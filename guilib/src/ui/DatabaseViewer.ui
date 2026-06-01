@@ -2812,6 +2812,19 @@
            </property>
           </widget>
          </item>
+         <item row="10" column="0">
+          <widget class="QLineEdit" name="lineEdit_detectMore_logFile"/>
+         </item>
+         <item row="10" column="1">
+          <widget class="QLabel" name="label_detectMore_logFile">
+           <property name="text">
+            <string>Detect-more log file</string>
+           </property>
+           <property name="wordWrap">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
         </layout>
        </widget>
        <widget class="QWidget" name="page_2">

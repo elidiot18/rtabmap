@@ -39,6 +39,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <QtCore/QTextStream>
 #include <QtCore/QDateTime>
 #include <QtCore/QSettings>
+#include <QFile>
+#include <algorithm>
 #include <QThread>
 #include <rtabmap/utilite/ULogger.h>
 #include <rtabmap/utilite/UDirectory.h>
@@ -481,6 +483,7 @@ DatabaseViewer::DatabaseViewer(const QString & ini, QWidget * parent) :
 	connect(ui_->doubleSpinBox_detectMore_angle, SIGNAL(valueChanged(double)), this, SLOT(configModified()));
 	connect(ui_->spinBox_detectMore_iterations, SIGNAL(valueChanged(int)), this, SLOT(configModified()));
 	connect(ui_->checkBox_detectMore_intraSession, SIGNAL(stateChanged(int)), this, SLOT(configModified()));
+	connect(ui_->lineEdit_detectMore_logFile, SIGNAL(textChanged(QString)), this, SLOT(configModified()));
 	connect(ui_->checkBox_detectMore_interSession, SIGNAL(stateChanged(int)), this, SLOT(configModified()));
 	connect(ui_->spinBox_minGraphDistance, SIGNAL(valueChanged(int)), this, SLOT(configModified()));
 	connect(ui_->checkBox_opt_graph_as_guess, SIGNAL(stateChanged(int)), this, SLOT(configModified()));
@@ -681,6 +684,7 @@ void DatabaseViewer::readSettings()
 	ui_->checkBox_detectMore_interSession->setChecked(settings.value("inter_session", ui_->checkBox_detectMore_interSession->isChecked()).toBool());
 	ui_->checkBox_opt_graph_as_guess->setChecked(settings.value("opt_graph_as_guess", ui_->checkBox_opt_graph_as_guess->isChecked()).toBool());
 	ui_->spinBox_minGraphDistance->setValue(settings.value("min_graph_distance", ui_->spinBox_minGraphDistance->value()).toInt());
+	ui_->lineEdit_detectMore_logFile->setText(settings.value("detect_more_log_file", ui_->lineEdit_detectMore_logFile->text()).toString());
 	settings.endGroup();
 	settings.endGroup();
 
@@ -779,6 +783,7 @@ void DatabaseViewer::writeSettings()
 	settings.setValue("inter_session", ui_->checkBox_detectMore_interSession->isChecked());
 	settings.setValue("opt_graph_as_guess", ui_->checkBox_opt_graph_as_guess->isChecked());
 	settings.setValue("min_graph_distance", ui_->spinBox_minGraphDistance->value());
+	settings.setValue("detect_more_log_file", ui_->lineEdit_detectMore_logFile->text());
 	settings.endGroup();
 	settings.endGroup();
 
@@ -4266,6 +4271,33 @@ void DatabaseViewer::generate3DMap()
 	}
 }
 
+// Parse a detect-more log file produced by addConstraint logging.
+static void parseDetectMoreLogFile(const QString & path, std::map<std::pair<int,int>, std::string> & detected)
+{
+	detected.clear();
+	if(path.isEmpty()) return;
+	QFile f(path);
+	if(!f.open(QIODevice::ReadOnly | QIODevice::Text)) return;
+	QTextStream in(&f);
+	while(!in.atEnd())
+	{
+		QString line = in.readLine().trimmed();
+		if(line.isEmpty() || line.startsWith("#")) continue;
+		QStringList tokens = line.split(';');
+		if(tokens.size() < 4) tokens = line.split(',');
+		if(tokens.size() < 4) continue;
+		bool ok1=false, ok2=false;
+		int from = tokens[2].toInt(&ok1);
+		int to = tokens[3].toInt(&ok2);
+		if(!ok1 || !ok2) continue;
+		int a = std::min(from, to);
+		int b = std::max(from, to);
+		std::string status = tokens.size()>1?tokens[1].toStdString():"";
+		detected[std::make_pair(a,b)] = status;
+	}
+	f.close();
+}
+
 void DatabaseViewer::detectMoreLoopClosures()
 {
 	if(graphes_.empty())
@@ -4295,7 +4327,15 @@ void DatabaseViewer::detectMoreLoopClosures()
 	{
 		odomMaxInf_ = graph::getMaxOdomInf(links);
 	}
-	links = graph::filterLinks(links, Link::kNeighbor, true); // keep only neighbor links
+	
+	/* Commented from the original code */
+	// links = graph::filterLinks(links, Link::kNeighbor, true); // keep only neighbor links
+	
+	/* Using graph distance: nodes can't be linked if their current distance in the full graph is less than minimumGraphDistance.
+	 * If minimumGraphDistance > 1, we also allow nodes to participate to several loops closures in the same iteration. */
+
+	int minimumGraphDistance = ui_->spinBox_minGraphDistance->value();
+	bool usingGraphDistance = minimumGraphDistance > 1;
 
 	int iterations = ui_->spinBox_detectMore_iterations->value();
 	UASSERT(iterations > 0);
@@ -4306,7 +4346,6 @@ void DatabaseViewer::detectMoreLoopClosures()
 	bool interSession = ui_->checkBox_detectMore_interSession->isChecked();
 	bool useOptimizedGraphAsGuess = ui_->checkBox_opt_graph_as_guess->isChecked();
 	int fromToMapId = ui_->spinBox_fromToMapId->value();
-	int minimumGraphDistance = ui_->spinBox_minGraphDistance->value();
 	if(!interSession && !intraSession)
 	{
 		QMessageBox::warning(this, tr("Cannot detect more loop closures"), tr("Intra and inter session parameters are disabled! Enable one or both."));
@@ -4314,6 +4353,19 @@ void DatabaseViewer::detectMoreLoopClosures()
 	}
 
 	std::shared_ptr<Registration> reg(Registration::create(ui_->parameters_toolbox->getParameters()));
+
+	// If a detect-more log file is specified, parse it once and populate checkedLoopClosures
+	QString detectMoreLog = ui_->lineEdit_detectMore_logFile->text().trimmed();
+	if(!detectMoreLog.isEmpty())
+	{
+		std::map<std::pair<int,int>, std::string> tested;
+		parseDetectMoreLogFile(detectMoreLog, tested);
+		for(std::map<std::pair<int,int>, std::string>::const_iterator iter=tested.begin(); iter!=tested.end(); ++iter)
+		{
+			checkedLoopClosures.insert(std::make_pair(iter->first.first, iter->first.second));
+		}
+		progressDialog->appendText(tr("Loaded detect-more log file %1: %2 tested loops.").arg(detectMoreLog).arg((int)tested.size()));
+	}
 
 	for(int n=0; n<iterations; ++n)
 	{
@@ -4354,33 +4406,28 @@ void DatabaseViewer::detectMoreLoopClosures()
 			}
 		}
 
-		if(minimumGraphDistance > 1)
+		// Skip clusters already tested
+		if(!checkedLoopClosures.empty())
 		{
-			int clusterBefore = clusters.size();
-			for(std::multimap<int, int>::iterator iter=clusters.begin(); iter!=clusters.end();)
+			int removed = 0;
+			for(std::multimap<int,int>::iterator it=clusters.begin(); it!=clusters.end();)
 			{
-				if(abs(iter->first - iter->second) < minimumGraphDistance)
+				int a = std::min(it->first, it->second);
+				int b = std::max(it->first, it->second);
+				if(rtabmap::graph::findLink(checkedLoopClosures, a, b) != checkedLoopClosures.end())
 				{
-					iter = clusters.erase(iter);
+					it = clusters.erase(it);
+					++removed;
 				}
 				else
 				{
-					// compute path to know how far we are in terms of graph length
-					std::list<int> path = graph::computePath(links, iter->first, iter->second);
-					if(!path.empty() && (int)path.size() <= minimumGraphDistance)
-					{
-						iter = clusters.erase(iter);
-					}
-					else
-					{
-						++iter;
-					}
+					++it;
 				}
 			}
-			progressDialog->appendText(tr("Filtered %1/%2 clusters for too close nodes (below minimum graph distance=%3).")
-				.arg(clusterBefore-clusters.size()).arg(clusterBefore).arg(minimumGraphDistance));
-			QApplication::processEvents();
+			progressDialog->appendText(tr("Skipping %1 clusters already tested.").arg(removed));
 		}
+
+		/* No pre-filtering of clusters with graph distance, everything is done inside the loop */
 
 		progressDialog->setMaximumSteps(progressDialog->maximumSteps()+(int)clusters.size());
 		QApplication::processEvents();
@@ -4403,32 +4450,71 @@ void DatabaseViewer::detectMoreLoopClosures()
 			if((interSession && mapIdFrom != mapIdTo) ||
 		       (intraSession && mapIdFrom == mapIdTo))
 			{
-				// only add new links and one per cluster per iteration
-				if(rtabmap::graph::findLink(checkedLoopClosures, from, to) == checkedLoopClosures.end())
+				if(usingGraphDistance)
 				{
-					if(!findActiveLink(from, to).isValid() && !containsLink(linksRemoved_, from, to) &&
-					   addedLinks.find(from) == addedLinks.end() &&
-					   addedLinks.find(to) == addedLinks.end())
+					if(abs(from - to) < minimumGraphDistance)
 					{
-						// Reverify if in the bounds with the current optimized graph
-						Transform delta = optimizedPoses.at(from).inverse() * optimizedPoses.at(to);
-						if(delta.getNorm() < ui_->doubleSpinBox_detectMore_radius->value() &&
-						   delta.getNorm() >= ui_->doubleSpinBox_detectMore_radiusMin->value())
+						progressDialog->incrementStep();
+						if(i%100 == 0)
 						{
-							checkedLoopClosures.insert(std::make_pair(from, to));
-							if(addConstraint(from, to, reg.get(), true, useOptimizedGraphAsGuess))
+							QApplication::processEvents();
+						}
+						continue;
+					}
+					std::list<int> path = graph::computePath(links, from, to);
+					if(!path.empty() && (int)path.size() <= minimumGraphDistance)
+					{
+						progressDialog->incrementStep();
+						if(i%100 == 0)
+						{
+							QApplication::processEvents();
+						}
+						continue;
+					}
+				}
+				// only add new links and if not using graph distance, one per cluster per iteration
+				if(
+					!findActiveLink(from, to).isValid() && !containsLink(linksRemoved_, from, to) &&
+					(usingGraphDistance || (addedLinks.find(from) == addedLinks.end() &&
+											           addedLinks.find(to) == addedLinks.end()))
+				)
+				{
+					// Reverify if in the bounds with the current optimized graph
+					Transform delta = optimizedPoses.at(from).inverse() * optimizedPoses.at(to);
+					if(delta.getNorm() < ui_->doubleSpinBox_detectMore_radius->value() &&
+						delta.getNorm() >= ui_->doubleSpinBox_detectMore_radiusMin->value())
+					{
+						checkedLoopClosures.insert(std::make_pair(from, to));
+						if(addConstraint(from, to, reg.get(), true, useOptimizedGraphAsGuess))
+						{
+							UINFO("Added new loop closure between %d and %d.", from, to);
+							++added;
+							addedLinks.insert(from);
+							addedLinks.insert(to);
+							lastAdded.first = from;
+							lastAdded.second = to;
+
+							progressDialog->appendText(tr("Detected loop closure %1->%2! (%3/%4)").arg(from).arg(to).arg(i+1).arg(clusters.size()));
+							QApplication::processEvents();
+
+							optimizedPoses = graphes_.back();
+
+							// Insert the newly added link into the local `links` map
+							// avoids having to recompute updatedLinksWithModifications()
 							{
-								UINFO("Added new loop closure between %d and %d.", from, to);
-								++added;
-								addedLinks.insert(from);
-								addedLinks.insert(to);
-								lastAdded.first = from;
-								lastAdded.second = to;
-
-								progressDialog->appendText(tr("Detected loop closure %1->%2! (%3/%4)").arg(from).arg(to).arg(i+1).arg(clusters.size()));
-								QApplication::processEvents();
-
-								optimizedPoses = graphes_.back();
+								std::multimap<int, Link>::const_iterator addedIter = rtabmap::graph::findLink(linksAdded_, from, to);
+								if(addedIter != linksAdded_.end())
+								{
+									// insert if not already present (check is redundant, remove it)
+									if(graph::findLink(links, addedIter->second.from(), addedIter->second.to(), false) == links.end())
+									{
+										links.insert(*addedIter);
+										if(addedIter->second.from() != addedIter->second.to())
+										{
+											links.insert(std::make_pair(addedIter->second.to(), addedIter->second.inverse()));
+										}
+									}
+								}
 							}
 						}
 					}
@@ -8876,6 +8962,7 @@ bool DatabaseViewer::addConstraint(int from, int to, Registration * reg, bool si
 	UASSERT(reg);
 
 	bool switchedIds = false;
+
 	if(from == to)
 	{
 		UWARN("Cannot add link to same node");
@@ -9286,6 +9373,22 @@ bool DatabaseViewer::addConstraint(int from, int to, Registration * reg, bool si
 		{
 			updateLoopClosuresSlider(from, to);
 			this->updateGraphView();
+		}
+	}
+
+	// Log minimal detect-more loop info (timestamp;status;from;to) if requested
+	QString detectMoreLog = ui_->lineEdit_detectMore_logFile->text().trimmed();
+	if(!detectMoreLog.isEmpty())
+	{
+		QFile f(detectMoreLog);
+		if(f.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
+		{
+			QTextStream out(&f);
+			QString status = updateConstraints?"accepted":"rejected";
+			int logFrom = std::min(from, to);
+			int logTo = std::max(from, to);
+			out << QDateTime::currentDateTime().toString(Qt::ISODate) << ";" << status << ";" << logFrom << ";" << logTo << "\n";
+			f.close();
 		}
 	}
 
