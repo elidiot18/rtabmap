@@ -88,6 +88,7 @@ protected:
 	virtual bool eventFilter(QObject *obj, QEvent *event);
 
 private Q_SLOTS:
+	void updateGraphInteractionMode();
 	void writeSettings();
 	void restoreDefaultSettings();
 	void configModified();
@@ -159,6 +160,12 @@ private Q_SLOTS:
 	void updateConstraintButtons();
 
 private:
+	QList<int> selectedGraphNodeIds() const;
+	bool exportSelectedNodesOnly(const QWidget * dialog) const;
+	void filterSelectedNodes(std::map<int, Transform> & poses) const;
+	void filterSelectedNodes(std::multimap<int, Link> & links) const;
+	void filterSelectedNodes(std::map<int, Transform> & poses, std::multimap<int, Link> & links) const;
+	
 	QString getIniFilePath() const;
 	void readSettings();
 

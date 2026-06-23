@@ -30,6 +30,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "ui_DatabaseViewer.h"
 #include <QMessageBox>
 #include <QFileDialog>
+#include <QCheckBox>
 #include <QInputDialog>
 #include <QColorDialog>
 #include <QGraphicsLineItem>
@@ -246,6 +247,7 @@ DatabaseViewer::DatabaseViewer(const QString & ini, QWidget * parent) :
 	exportDialog_->setObjectName("ExportCloudsDialog");
 	restoreDefaultSettings();
 	this->readSettings();
+	updateGraphInteractionMode();
 
 	setupMainLayout(ui_->actionVertical_Layout->isChecked());
 	ui_->comboBox_octomap_rendering_type->setVisible(ui_->checkBox_octomap->isChecked());
@@ -273,6 +275,10 @@ DatabaseViewer::DatabaseViewer(const QString & ini, QWidget * parent) :
 
 	connect(ui_->graphViewer, SIGNAL(nodeSelected(int)), this , SLOT(graphNodeSelected(int)));
 	connect(ui_->graphViewer, SIGNAL(linkSelected(int,int)), this , SLOT(graphLinkSelected(int,int)));
+	connect(ui_->radioButton_graphHand, SIGNAL(toggled(bool)), this, SLOT(updateGraphInteractionMode()));
+	connect(ui_->radioButton_graphSelection, SIGNAL(toggled(bool)), this, SLOT(updateGraphInteractionMode()));
+	connect(ui_->radioButton_graphHand, SIGNAL(toggled(bool)), this, SLOT(configModified()));
+	connect(ui_->radioButton_graphSelection, SIGNAL(toggled(bool)), this, SLOT(configModified()));
 
 	connect(ui_->parameters_toolbox, SIGNAL(parametersChanged(const QStringList &)), this, SLOT(notifyParametersChanged(const QStringList &)));
 
@@ -487,6 +493,7 @@ DatabaseViewer::DatabaseViewer(const QString & ini, QWidget * parent) :
 	connect(ui_->checkBox_detectMore_interSession, SIGNAL(stateChanged(int)), this, SLOT(configModified()));
 	connect(ui_->spinBox_minGraphDistance, SIGNAL(valueChanged(int)), this, SLOT(configModified()));
 	connect(ui_->checkBox_opt_graph_as_guess, SIGNAL(stateChanged(int)), this, SLOT(configModified()));
+	connect(ui_->checkBox_onlySelectedNodes, SIGNAL(toggled(bool)), this, SLOT(configModified()));
 
 	connect(ui_->lineEdit_obstacleColor, SIGNAL(textChanged(const QString &)), this, SLOT(configModified()));
 	connect(ui_->lineEdit_groundColor, SIGNAL(textChanged(const QString &)), this, SLOT(configModified()));
@@ -580,6 +587,18 @@ void DatabaseViewer::configModified()
 	this->setWindowModified(true);
 }
 
+void DatabaseViewer::updateGraphInteractionMode()
+{
+	if(ui_->radioButton_graphSelection->isChecked())
+	{
+		ui_->graphViewer->setInteractionMode(GraphViewer::SelectionMode);
+	}
+	else
+	{
+		ui_->graphViewer->setInteractionMode(GraphViewer::HandMode);
+	}
+}
+
 QString DatabaseViewer::getIniFilePath() const
 {
 	if(!iniFilePath_.isEmpty())
@@ -619,10 +638,13 @@ void DatabaseViewer::readSettings()
 	ui_->actionConcise_Layout->setChecked(settings.value("conciseLayout", ui_->actionConcise_Layout->isChecked()).toBool());
 	ui_->checkBox_ignoreIntermediateNodes->setChecked(settings.value("ignoreIntermediateNodes", ui_->checkBox_ignoreIntermediateNodes->isChecked()).toBool());
 	ui_->checkBox_timeStats->setChecked(settings.value("timeStats", ui_->checkBox_timeStats->isChecked()).toBool());
+	ui_->checkBox_onlySelectedNodes->setChecked(settings.value("graphSelectedNodesOnly", ui_->checkBox_onlySelectedNodes->isChecked()).toBool());
 
 	// GraphViewer settings
 	ui_->graphViewer->loadSettings(settings, "GraphView");
 	ui_->graphViewer->setReferentialVisible(false);
+	ui_->radioButton_graphSelection->setChecked(settings.value("graphInteractionMode", (int)ui_->graphViewer->getInteractionMode()).toInt() == 1);
+	ui_->radioButton_graphHand->setChecked(!ui_->radioButton_graphSelection->isChecked());
 
 	settings.beginGroup("optimization");
 	ui_->doubleSpinBox_gainCompensationRadius->setValue(settings.value("gainCompensationRadius", ui_->doubleSpinBox_gainCompensationRadius->value()).toDouble());
@@ -717,6 +739,9 @@ void DatabaseViewer::writeSettings()
 	settings.setValue("conciseLayout", ui_->actionConcise_Layout->isChecked());
 	settings.setValue("ignoreIntermediateNodes", ui_->checkBox_ignoreIntermediateNodes->isChecked());
 	settings.setValue("timeStats", ui_->checkBox_timeStats->isChecked());
+	settings.setValue("graphInteractionMode", ui_->radioButton_graphSelection->isChecked() ? 1 : 0);
+	settings.setValue("graphSelectedNodesOnly", ui_->checkBox_onlySelectedNodes->isChecked());
+
 
 	// save GraphViewer settings
 	ui_->graphViewer->saveSettings(settings, "GraphView");
@@ -866,6 +891,9 @@ void DatabaseViewer::restoreDefaultSettings()
 	ui_->checkBox_opt_graph_as_guess->setChecked(true);
 	ui_->spinBox_fromToMapId->setValue(-1);
 	ui_->spinBox_minGraphDistance->setValue(10);
+	ui_->radioButton_graphHand->setChecked(true);
+	ui_->radioButton_graphSelection->setChecked(false);
+	ui_->checkBox_onlySelectedNodes->setChecked(false);
 }
 
 void DatabaseViewer::openDatabase()
@@ -1396,19 +1424,52 @@ void DatabaseViewer::exportDatabase()
 			int framesIgnored = dialog.framesIgnored();
 			double frameRate = dialog.targetFramerate();
 			int sessionExported = dialog.sessionExported();
+			//bool onlySelectedNodes = dialog.onlySelectedNodes();
+			// Need to update ExportDialog to have this option, for now, use the checkbox for DetectMoreLoops
+			bool onlySelectedNodes = ui_->checkBox_onlySelectedNodes->isChecked();
+
 			QString path = dialog.outputPath();
 			rtabmap::DataRecorder recorder;
-			QList<int> ids;
+			QList<int> ids = ids_;
+
+			if(onlySelectedNodes)
+			{
+				QList<int> selectedIds = ui_->graphViewer->selectedNodeIds();
+				if(selectedIds.isEmpty())
+				{
+					QMessageBox::warning(this, tr("Cannot export database"), tr("No nodes are selected in Graph View."));
+					return;
+				}
+
+				std::set<int> selected(selectedIds.begin(), selectedIds.end());
+				for(QList<int>::iterator iter = ids.begin(); iter != ids.end(); )
+				{
+					if(selected.find(*iter) == selected.end())
+					{
+						iter = ids.erase(iter);
+					}
+					else
+					{
+						++iter;
+					}
+				}
+
+				if(ids.isEmpty())
+				{
+					QMessageBox::warning(this, tr("Cannot export database"), tr("No nodes to export after applying the selection filter."));
+					return;
+				}
+			}
 
 			double previousStamp = 0;
-			std::vector<double> delays(ids_.size());
+			std::vector<double> delays(ids.size());
 			int oi=0;
 			std::map<int, Transform> poses;
 			std::map<int, double> stamps;
 			std::map<int, Transform> groundTruths;
 			std::map<int, GPS> gpsValues;
 			std::map<int, EnvSensors> sensorsValues;
-			for(int i=0; i<ids_.size(); i+=1+framesIgnored)
+			for(int i=0; i<ids.size(); i+=1+framesIgnored)
 			{
 				Transform odomPose, groundTruth;
 				int weight = -1;
@@ -1418,7 +1479,7 @@ void DatabaseViewer::exportDatabase()
 				std::vector<float> velocity;
 				GPS gps;
 				EnvSensors sensors;
-				if(dbDriver_->getNodeInfo(ids_[i], odomPose, mapId, weight, label, stamp, groundTruth, velocity, gps, sensors))
+				if(dbDriver_->getNodeInfo(ids[i], odomPose, mapId, weight, label, stamp, groundTruth, velocity, gps, sensors))
 				{
 					if(frameRate == 0 ||
 					   previousStamp == 0 ||
@@ -1427,24 +1488,25 @@ void DatabaseViewer::exportDatabase()
 					{
 						if(sessionExported < 0 || sessionExported == mapId)
 						{
-							ids.push_back(ids_[i]);
-
-							if(previousStamp && stamp)
+							if(oi < (int)delays.size())
 							{
-								delays[oi++] = stamp - previousStamp;
+								if(previousStamp && stamp)
+								{
+									delays[oi++] = stamp - previousStamp;
+								}
 							}
 							previousStamp = stamp;
 
-							poses.insert(std::make_pair(ids_[i], odomPose));
-							stamps.insert(std::make_pair(ids_[i], stamp));
-							groundTruths.insert(std::make_pair(ids_[i], groundTruth));
+							poses.insert(std::make_pair(ids[i], odomPose));
+							stamps.insert(std::make_pair(ids[i], stamp));
+							groundTruths.insert(std::make_pair(ids[i], groundTruth));
 							if(gps.stamp() > 0.0)
 							{
-								gpsValues.insert(std::make_pair(ids_[i], gps));
+								gpsValues.insert(std::make_pair(ids[i], gps));
 							}
 							if(sensors.size())
 							{
-								sensorsValues.insert(std::make_pair(ids_[i], sensors));
+								sensorsValues.insert(std::make_pair(ids[i], sensors));
 							}
 						}
 					}
@@ -4442,6 +4504,20 @@ void DatabaseViewer::detectMoreLoopClosures()
 			{
 				from = iter->second;
 				to = iter->first;
+			}
+
+			if (ui_->checkBox_onlySelectedNodes->isChecked())
+			{
+				QList<int> selectedIds = ui_->graphViewer->selectedNodeIds();
+				if (!selectedIds.contains(from) || !selectedIds.contains(to))
+				{
+					progressDialog->incrementStep();
+					if(i%100 == 0)
+					{
+						QApplication::processEvents();
+					}
+					continue;
+				}
 			}
 
 			int mapIdFrom = uValue(mapIds_, from, 0);

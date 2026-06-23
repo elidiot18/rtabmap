@@ -33,6 +33,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <QGraphicsView>
 #include <QtCore/QMap>
 #include <QtCore/QSettings>
+#include <QtCore/QList>
 #include <rtabmap/core/Link.h>
 #include <rtabmap/core/GPS.h>
 #include <opencv2/opencv.hpp>
@@ -55,6 +56,7 @@ class RTABMAP_GUI_EXPORT GraphViewer : public QGraphicsView {
 
 public:
 	enum ViewPlane {XY, XZ, YZ};
+	enum InteractionMode {HandMode, SelectionMode};
 
 public:
 	GraphViewer(QWidget * parent = 0);
@@ -170,6 +172,9 @@ public:
 	void setOrientationENU(bool enabled);
 	void setViewPlane(ViewPlane plane);
 	void setEnsureFrameVisible(bool visible);
+	void setInteractionMode(InteractionMode mode);
+	InteractionMode getInteractionMode() const {return _interactionMode;}
+	QList<int> selectedNodeIds() const;
 
 Q_SIGNALS:
 	void configChanged();
@@ -247,6 +252,7 @@ private:
 	bool _mouseTracking;
 	ViewPlane _viewPlane;
 	bool _ensureFrameVisible;
+	InteractionMode _interactionMode;
 	QPoint _previousMousePos;
 };
 
