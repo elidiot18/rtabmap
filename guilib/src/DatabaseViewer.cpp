@@ -4499,22 +4499,12 @@ void DatabaseViewer::detectMoreLoopClosures()
 
 							optimizedPoses = graphes_.back();
 
-							// Insert the newly added link into the local `links` map
-							// avoids having to recompute updatedLinksWithModifications()
+							std::multimap<int, Link>::const_iterator addedIter = rtabmap::graph::findLink(linksAdded_, from, to);
+							
+							if(addedIter != linksAdded_.end())
 							{
-								std::multimap<int, Link>::const_iterator addedIter = rtabmap::graph::findLink(linksAdded_, from, to);
-								if(addedIter != linksAdded_.end())
-								{
-									// insert if not already present (check is redundant, remove it)
-									if(graph::findLink(links, addedIter->second.from(), addedIter->second.to(), false) == links.end())
-									{
-										links.insert(*addedIter);
-										if(addedIter->second.from() != addedIter->second.to())
-										{
-											links.insert(std::make_pair(addedIter->second.to(), addedIter->second.inverse()));
-										}
-									}
-								}
+							    links.insert(*addedIter);
+							    links.insert(std::make_pair(addedIter->second.to(), addedIter->second.inverse()));
 							}
 						}
 					}
