@@ -783,9 +783,11 @@ SensorData DBReader::getNextData(SensorCaptureInfo * info)
 			cv::Mat descriptors = s->getWordsDescriptors().clone();
 			const std::vector<cv::KeyPoint> & keypoints = s->getWordsKpts();
 			const std::vector<cv::Point3f> & keypoints3D = s->getWords3();
+			const std::vector<cv::Matx33f> & keypoints3DCovariances = s->getWords3Covariances();
 			if(!_featuresIgnored &&
 				!keypoints.empty() &&
 			   (keypoints3D.empty() || keypoints.size() == keypoints3D.size()) &&
+			   (keypoints3DCovariances.empty() || keypoints.size() == keypoints3DCovariances.size()) &&
 			   (descriptors.empty() || (int)keypoints.size() == descriptors.rows))
 			{
 				if(!cameraOldNewIndices.empty())
@@ -793,6 +795,7 @@ SensorData DBReader::getNextData(SensorCaptureInfo * info)
 					cv::Mat newDescriptors;
 					std::vector<cv::KeyPoint> newKeypoints;
 					std::vector<cv::Point3f> newKeypoints3D;
+					std::vector<cv::Matx33f> newKeypoints3DCovariance;
 					UASSERT(!dbModels.empty() && dbModels[0].imageWidth()>0);
 					int subImageWidth = dbModels[0].imageWidth();
 					for(size_t i = 0; i<keypoints.size(); ++i)
@@ -812,19 +815,31 @@ SensorData DBReader::getNextData(SensorCaptureInfo * info)
 								pt = util3d::transformPoint(pt, combinedLocalTransforms[cameraIndex]);
 								newKeypoints3D.push_back(pt);
 							}
+							if(!keypoints3DCovariances.empty())
+							{
+								// The 3D point above was re-expressed in another camera's frame;
+								// its covariance has to follow the same rotation.
+								const Transform reframe = combinedLocalTransforms[cameraIndex] * dbModels[cameraIndex].localTransform().inverse();
+								const cv::Matx33f R(
+										reframe.r11(), reframe.r12(), reframe.r13(),
+										reframe.r21(), reframe.r22(), reframe.r23(),
+										reframe.r31(), reframe.r32(), reframe.r33());
+								newKeypoints3DCovariance.push_back(cv::Matx33f(R * keypoints3DCovariances.at(i) * R.t()));
+							}
 							if(!descriptors.empty())
 							{
 								newDescriptors.push_back(descriptors.row(i));
 							}
 						}
 					}
-					data.setFeatures(newKeypoints, newKeypoints3D, newDescriptors);
+					data.setFeatures(newKeypoints, newKeypoints3D, newDescriptors, newKeypoints3DCovariance);
 				}
 				else if(!combinedLocalTransforms.empty())
 				{
 					// We are overriding the camera local transforms, let's move 3D words accordingly
 					UASSERT(dbModels.size() == combinedLocalTransforms.size());
 					std::vector<cv::Point3f> newKeypoints3D;
+					std::vector<cv::Matx33f> newKeypoints3DCovariance;
 					UASSERT(dbModels[0].imageWidth()>0);
 					int subImageWidth = dbModels[0].imageWidth();
 					for(size_t i = 0; i<keypoints3D.size(); ++i)
@@ -833,15 +848,23 @@ SensorData DBReader::getNextData(SensorCaptureInfo * info)
 						UASSERT_MSG(cameraIndex >= 0 && cameraIndex < (int)dbModels.size(),
 								uFormat("cameraIndex=%d, db models=%d, kpt.x=%f, image width=%d",
 										cameraIndex, (int)dbModels.size(), keypoints[i].pt.x, subImageWidth).c_str());
-						cv::Point3f pt = util3d::transformPoint(keypoints3D.at(i), dbModels[cameraIndex].localTransform().inverse());
-						pt = util3d::transformPoint(pt, combinedLocalTransforms[cameraIndex]);
-						newKeypoints3D.push_back(pt);
+						const Transform reframe = combinedLocalTransforms[cameraIndex] * dbModels[cameraIndex].localTransform().inverse();
+						newKeypoints3D.push_back(util3d::transformPoint(keypoints3D.at(i), reframe));
+						if(!keypoints3DCovariances.empty())
+						{
+							// Covariances live in the same frame as the points, so they rotate with them.
+							const cv::Matx33f R(
+									reframe.r11(), reframe.r12(), reframe.r13(),
+									reframe.r21(), reframe.r22(), reframe.r23(),
+									reframe.r31(), reframe.r32(), reframe.r33());
+							newKeypoints3DCovariance.push_back(cv::Matx33f(R * keypoints3DCovariances.at(i) * R.t()));
+						}
 					}
-					data.setFeatures(keypoints, newKeypoints3D, descriptors);
+					data.setFeatures(keypoints, newKeypoints3D, descriptors, newKeypoints3DCovariance);
 				}
 				else
 				{
-					data.setFeatures(keypoints, keypoints3D, descriptors);
+					data.setFeatures(keypoints, keypoints3D, descriptors, keypoints3DCovariances);
 				}
 			}
 			else if(!_featuresIgnored && !keypoints.empty() && (!keypoints3D.empty() || !descriptors.empty()))

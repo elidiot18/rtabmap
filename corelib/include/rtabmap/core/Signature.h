@@ -417,13 +417,14 @@ public:
 	 * @param words Multimap of word IDs to keypoint indices (allows duplicate words). The keypoint indices match the keypoints, points and descriptors.
 	 * @param keypoints Vector of 2D keypoints in image coordinates. The keypoints must be in the same order as the words.
 	 * @param words3 Vector of 3D points in base_link frame (with localTransform applied). The points must be in the same order as the words.
+	 * @param words3Covariances (override) Vector of 3x3 position covariances (base_link frame) for each 3D word. The values must be in the same order as the words. May be empty.
 	 * @param descriptors Feature descriptors matrix (one row per word). The descriptors must be in the same order as the words.
 	 * 
 	 * @note The signature is disabled after setting words (must be explicitly enabled).
 	 * @note Invalid words (ID <= 0) are counted in `_invalidWordsCount`.
 	 * @note All arrays must have the same size (number of words).
 	 */
-	void setWords(const std::multimap<int, int> & words, const std::vector<cv::KeyPoint> & keypoints, const std::vector<cv::Point3f> & words3, const cv::Mat & descriptors);
+	void setWords(const std::multimap<int, int> & words, const std::vector<cv::KeyPoint> & keypoints, const std::vector<cv::Point3f> & words3, const std::vector<cv::Matx33f> & words3Covariances, const cv::Mat & descriptors);
 	
 	/**
 	 * @brief Checks if this signature is enabled
@@ -560,6 +561,17 @@ public:
 	 * @return Const reference to the vector of 3D points
 	 */
 	const std::vector<cv::Point3f> & getWords3() const {return _words3;}
+
+	/**
+	 * @brief Returns the 3D position covariances of the visual words
+	 * 
+	 * One symmetric 3x3 covariance per 3D word, in the same base_link frame as
+	 * @ref getWords3(), built at extraction time from the sensor noise model
+	 * (see Kp/DepthCovEnabled). Empty when the feature covariance is disabled.
+	 *
+	 * @return Const reference to the vector of 3x3 covariances
+	 */
+	const std::vector<cv::Matx33f> & getWords3Covariances() const {return _words3Covariances;}
 	
 	/**
 	 * @brief Returns the pose of this signature
@@ -635,6 +647,7 @@ private:
 	std::multimap<int, int> _words; ///< Visual words: word ID -> keypoint index (multimap allows duplicates)
 	std::vector<cv::KeyPoint> _wordsKpts; ///< 2D keypoints in image coordinates
 	std::vector<cv::Point3f> _words3; ///< 3D points in base_link frame (with localTransform applied)
+	std::vector<cv::Matx33f> _words3Covariances; ///< 3x3 position covariance of each 3d word, in base_link frame
 	cv::Mat _wordsDescriptors; ///< Feature descriptors matrix (one row per word)
 	std::map<int, int> _wordsChanged; ///< Word ID change tracking: old ID -> new ID
 	bool _enabled; ///< Flag indicating if signature is enabled for place recognition

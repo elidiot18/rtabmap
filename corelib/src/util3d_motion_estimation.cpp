@@ -38,7 +38,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <pcl/common/common.h>
 
+#include <array>
+
 #include "opencv/solvepnp.h"
+#include "opencv/solvepnp_msac.h"
 
 #ifdef RTABMAP_OPENGV
 #include <opengv/absolute_pose/methods.hpp>
@@ -62,6 +65,7 @@ namespace {
 // RANSAC is bit-for-bit reproducible. Tests can flip this on via
 // setRansacDeterministicSeed(true); production code leaves it off.
 bool g_ransacDeterministicSeed = false;
+
 } // namespace
 
 void setRansacDeterministicSeed(bool enable)
@@ -90,11 +94,16 @@ Transform estimateMotion3DTo2D(
 			cv::Mat * covariance,
 			std::vector<int> * matchesOut,
 			std::vector<int> * inliersOut,
-			bool splitLinearCovarianceComponents)
+			bool splitLinearCovarianceComponents,
+			const std::map<int, cv::Matx33f>& covariances3A,
+			bool useMsac,
+			float pixelVariance,
+			bool msacUseFeatureCovariance)
 {
 	UASSERT(cameraModel.isValidForProjection());
 	UASSERT(!guess.isNull());
 	UASSERT(varianceMedianRatio>1);
+
 	Transform transform;
 	std::vector<int> matches, inliers;
 
@@ -107,13 +116,31 @@ Transform estimateMotion3DTo2D(
 	std::vector<int> ids = uKeys(words2B);
 	std::vector<cv::Point3f> objectPoints(ids.size());
 	std::vector<cv::Point2f> imagePoints(ids.size());
+	std::vector<cv::Matx33f> objectCovariances(ids.size());
 	int oi=0;
+	int skippedNoCovariance=0;
+	if(msacUseFeatureCovariance && covariances3A.empty())
+	{
+		UWARN("No feature covariance available, falling back to the classical MSac cost.");
+		msacUseFeatureCovariance = false;
+	}
 	matches.resize(ids.size());
 	for(unsigned int i=0; i<ids.size(); ++i)
 	{
 		std::map<int, cv::Point3f>::const_iterator iter=words3A.find(ids[i]);
 		if(iter != words3A.end() && util3d::isFinite(iter->second))
 		{
+			if(msacUseFeatureCovariance)
+			{
+				// Words without a covariance are dropped rather than given an invented one.
+				std::map<int, cv::Matx33f>::const_iterator covIter = covariances3A.find(ids[i]);
+				if(covIter == covariances3A.end())
+				{
+					++skippedNoCovariance;
+					continue;
+				}
+				objectCovariances[oi] = covIter->second;
+			}
 			const cv::Point3f & pt = iter->second;
 			objectPoints[oi].x = pt.x;
 			objectPoints[oi].y = pt.y;
@@ -122,18 +149,23 @@ Transform estimateMotion3DTo2D(
 			matches[oi++] = ids[i];
 		}
 	}
+	if(skippedNoCovariance)
+	{
+		UDEBUG("Skipped %d correspondences without feature covariance.", skippedNoCovariance);
+	}
 
 	objectPoints.resize(oi);
 	imagePoints.resize(oi);
+	objectCovariances.resize(oi);
 	matches.resize(oi);
 
-	UDEBUG("words3A=%d words2B=%d matches=%d words3B=%d guess=%s reprojError=%f iterations=%d",
+	UDEBUG("words3A=%d words2B=%d matches=%d words3B=%d guess=%s reprojError=%f iterations=%d useMsac=%d",
 			(int)words3A.size(), (int)words2B.size(), (int)matches.size(), (int)words3B.size(),
-			guess.prettyPrint().c_str(), reprojError, iterations);
+			guess.prettyPrint().c_str(), reprojError, iterations, useMsac?1:0);
 
 	if((int)matches.size() >= minInliers)
 	{
-		//PnPRansac
+		//PnPRansac - PnPMsac
 		cv::Mat K = cameraModel.K();
 		cv::Mat D = cameraModel.D();
 		Transform guessCameraFrame = (guess * cameraModel.localTransform()).inverse();
@@ -147,7 +179,25 @@ Transform estimateMotion3DTo2D(
 		cv::Mat tvec = (cv::Mat_<double>(3,1) <<
 				(double)guessCameraFrame.x(), (double)guessCameraFrame.y(), (double)guessCameraFrame.z());
 
-		util3d::solvePnPRansac(
+		if(useMsac)
+		{
+			if(!msacUseFeatureCovariance)
+			{
+				objectCovariances.clear();
+			}
+			util3d::solvePnPMsac(
+				objectPoints,
+				imagePoints,
+				K, D,
+				objectCovariances,
+				rvec, tvec, 
+				!guessCameraFrame.isNull(), 
+				iterations, reprojError, minInliers, 
+				pixelVariance, inliers, flagsPnP, refineIterations, 3.0f);
+		}
+		else
+		{
+			util3d::solvePnPRansac(
 				objectPoints,
 				imagePoints,
 				K,
@@ -161,6 +211,7 @@ Transform estimateMotion3DTo2D(
 				inliers,
 				flagsPnP,
 				refineIterations);
+		}
 
 		if((int)inliers.size() >= minInliers)
 		{
@@ -1022,6 +1073,165 @@ void solvePnPRansac(
 		}
 
 		std::swap (inliers, new_inliers);
+		rvec = new_model_rvec;
+		tvec = new_model_tvec;
+	}
+
+}
+
+void solvePnPMsac(const std::vector<cv::Point3f> & objectPoints,
+				  const std::vector<cv::Point2f> & imagePoints,
+				  const cv::Mat & cameraMatrix,
+				  const cv::Mat & distCoeffs,
+				  const std::vector<cv::Matx33f> & covariances3A,
+				  cv::Mat & rvec, cv::Mat & tvec,
+				  bool useExtrinsicGuess, int iterationsCount,
+				  float reprojectionError, int minInliersCount,
+				  float pixelVariance, std::vector<int> & inliers, 
+				  int flags, int refineIterations, float refineSigma)
+{
+	if(minInliersCount < 4)
+	{
+		minInliersCount = 4;
+	}
+
+	UDEBUG("MSAC input points=%d useExtrinsicGuess=%d iterations=%d minInliers=%d flags=%d refineIterations=%d refineSigma=%f",
+		   (int)objectPoints.size(), useExtrinsicGuess, iterationsCount, minInliersCount, flags, refineIterations, refineSigma);
+
+	// The error is a squared Mahalanobis distance, so the gate is in chi2 units.
+	const float chi2_95_2dof = 5.99146f; // 95% quantile of a chi2 with 2 dof
+	float inlierThreshold = (reprojectionError > 0.0f && pixelVariance > 0.0f) ?
+			(reprojectionError*reprojectionError)/pixelVariance : chi2_95_2dof;
+
+	cv_custom::solvePnPMsac(
+			objectPoints, imagePoints, cameraMatrix, distCoeffs, covariances3A,
+			rvec, tvec, useExtrinsicGuess, iterationsCount, inlierThreshold, 
+			0.99, pixelVariance, inliers, flags);
+
+
+	if((int)inliers.size() >= minInliersCount && refineIterations > 0)
+	{
+		float error_threshold = inlierThreshold;
+		int refine_iterations = 0;
+		bool inlier_changed = false, oscillating = false;
+		std::vector<int> final_inliers = inliers;
+		std::vector<int> new_inliers, prev_inliers = inliers;
+		std::vector<size_t> inliers_sizes;
+
+		// Unlike solvePnPRansac(), clone: a cv::Mat assignment shares the buffer, so the
+		// refinement would write into the caller's pose and the final assignment be a no-op.
+		cv::Mat new_model_rvec = rvec.clone();
+		cv::Mat new_model_tvec = tvec.clone();
+
+		do
+		{
+			// Get inliers from the current model
+			std::vector<cv::Point3f> opoints_inliers(prev_inliers.size());
+			std::vector<cv::Point2f> ipoints_inliers(prev_inliers.size());
+			std::vector<cv::Matx33f> cov_inliers(covariances3A.empty()?0:prev_inliers.size());
+			for(unsigned int i = 0; i < prev_inliers.size(); ++i)
+			{
+				opoints_inliers[i] = objectPoints[prev_inliers[i]];
+				ipoints_inliers[i] = imagePoints[prev_inliers[i]];
+				if(!covariances3A.empty())
+				{
+					cov_inliers[i] = covariances3A[prev_inliers[i]];
+				}
+			}
+
+			UDEBUG("inliers=%d refine_iterations=%d, rvec=%f,%f,%f tvec=%f,%f,%f", (int)prev_inliers.size(), refine_iterations,
+				   *new_model_rvec.ptr<double>(0), *new_model_rvec.ptr<double>(1), *new_model_rvec.ptr<double>(2),
+				   *new_model_tvec.ptr<double>(0), *new_model_tvec.ptr<double>(1), *new_model_tvec.ptr<double>(2));
+
+			// Optimize the model coefficients
+			cv_custom::solvePnPMsacRefineLM(
+					new_model_rvec, new_model_tvec,
+					opoints_inliers,
+					ipoints_inliers,
+					cov_inliers,
+					pixelVariance,
+					cameraMatrix,
+					distCoeffs
+			);
+			inliers_sizes.push_back(prev_inliers.size());
+
+			// Select the new inliers based on the optimized coefficients and new threshold
+			std::vector<float> err = cv_custom::computeMahalanobisReprojErrors(
+				objectPoints, imagePoints, cameraMatrix, distCoeffs, 
+				new_model_rvec, new_model_tvec, covariances3A, pixelVariance, error_threshold, new_inliers
+			);
+
+			UDEBUG("MSAC refineModel: Number of inliers found (before/after): %d/%d, with an error threshold of %f.",
+				   (int)prev_inliers.size (), (int)new_inliers.size (), error_threshold);
+
+			// Unlike solvePnPRansac(), keep the set matching the refined pose: the swap below
+			// leaves new_inliers holding the previous iteration's set.
+			final_inliers = new_inliers;
+
+			if ((int)new_inliers.size() < minInliersCount)
+			{
+				++refine_iterations;
+				if (refine_iterations >= refineIterations)
+				{
+					break;
+				}
+				continue;
+			}
+
+			// Estimate the variance and the new threshold
+			float m = uMean(err.data(), err.size());
+			float variance = uVariance(err.data(), err.size());
+			error_threshold = std::min(inlierThreshold, refineSigma * float(sqrt(variance)));
+
+			UDEBUG ("MSAC refineModel: New estimated error threshold: %f (variance=%f mean=%f) on iteration %d out of %d.",
+				  error_threshold, variance, m, refine_iterations, refineIterations);
+
+			inlier_changed = false;
+			std::swap (prev_inliers, new_inliers);
+
+			// If the number of inliers changed, then we are still optimizing
+			if (new_inliers.size () != prev_inliers.size ())
+			{
+				// Check if the number of inliers is oscillating in between two values
+				// Like solvePnPRansac(), but fixed.
+				if (inliers_sizes.size () >= 4)
+				{
+					if (inliers_sizes[inliers_sizes.size () - 1] == inliers_sizes[inliers_sizes.size () - 3] &&
+						inliers_sizes[inliers_sizes.size () - 2] == inliers_sizes[inliers_sizes.size () - 4])
+					{
+						oscillating = true;
+						break;
+					}
+				}
+				inlier_changed = true;
+				continue;
+			}
+
+			// Check the values of the inlier set
+			for (size_t i = 0; i < prev_inliers.size (); ++i)
+			{
+				// If the value of the inliers changed, then we are still optimizing
+				if (prev_inliers[i] != new_inliers[i])
+				{
+					inlier_changed = true;
+					break;
+				}
+			}
+		}
+		while (inlier_changed && ++refine_iterations < refineIterations);
+
+		// If the new set of inliers is empty, we didn't do a good job refining
+		if ((int)prev_inliers.size() < minInliersCount)
+		{
+			UWARN ("MSAC refineModel: Refinement failed: got very low inliers (%d)!", (int)prev_inliers.size());
+		}
+
+		if (oscillating)
+		{
+			UDEBUG("MSAC refineModel: Detected oscillations in the model refinement.");
+		}
+
+		std::swap (inliers, final_inliers);
 		rvec = new_model_rvec;
 		tvec = new_model_tvec;
 	}

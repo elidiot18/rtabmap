@@ -3947,7 +3947,6 @@ LaserScan deskew(
 	return LaserScan(output, input.maxPoints(), input.rangeMax(), outputFormat, input.localTransform());
 }
 
-
 }
 
 }

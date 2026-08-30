@@ -579,7 +579,8 @@ void Memory::loadDataFromDb(bool postInitClosingEvents)
 							std::multimap<int, int> w;
 							std::vector<cv::KeyPoint> k;
 							std::vector<cv::Point3f> p;
-							_dbDriver->getLocalFeatures(s->id(), loadedWords, k, p, descriptors);
+							std::vector<cv::Matx33f> c;
+							_dbDriver->getLocalFeatures(s->id(), loadedWords, k, p, c, descriptors);
 							UASSERT_MSG(loadedWords.size() == words->size(), assertMsg.c_str()); // Just doublecheck
 							words = &loadedWords; // The index will be set
 							UASSERT_MSG(!descriptors.empty(), assertMsg.c_str());
@@ -3230,7 +3231,7 @@ void Memory::convertToIntermediate(int locationId)
 			}
 		}
 		location->setWeight(-1);
-		location->sensorData().setFeatures(std::vector<cv::KeyPoint>(), std::vector<cv::Point3f>(), cv::Mat());
+		location->sensorData().setFeatures(std::vector<cv::KeyPoint>(), std::vector<cv::Point3f>(), cv::Mat(), std::vector<cv::Matx33f>());
 		this->disableWordsRef(locationId); // won't be used for loop closure detection anymore
 		if(!_saveIntermediateNodeData)
 		{
@@ -3449,14 +3450,15 @@ Transform Memory::computeTransform(
 		std::multimap<int, int> words;
 		std::vector<cv::KeyPoint> keypoints;
 		std::vector<cv::Point3f> points;
+		std::vector<cv::Matx33f> covariances;
 		cv::Mat descriptors;
 		UTimer timer;
-		_dbDriver->getLocalFeatures(fromS.id(), words, keypoints, points, descriptors);
+		_dbDriver->getLocalFeatures(fromS.id(), words, keypoints, points, covariances, descriptors);
 		if(!words.empty() && !keypoints.empty()) {
 			UASSERT(words.size() == fromS.getWords().size());
 			std::map<int, int> wordsChanged = fromS.getWordsChanged();
 			bool wasEnabled = fromS.isEnabled();
-			fromS.setWords(words, keypoints, points, descriptors);
+			fromS.setWords(words, keypoints, points, covariances, descriptors);
 			for(const auto & iter: wordsChanged) {
 				fromS.changeWordsRef(iter.first, iter.second);
 			}
@@ -3496,9 +3498,9 @@ Transform Memory::computeTransform(
 		{
 			UDEBUG("");
 			tmpFrom.removeAllWords();
-			tmpFrom.sensorData().setFeatures(std::vector<cv::KeyPoint>(), std::vector<cv::Point3f>(), cv::Mat());
+			tmpFrom.sensorData().setFeatures(std::vector<cv::KeyPoint>(), std::vector<cv::Point3f>(), cv::Mat(), std::vector<cv::Matx33f>());
 			tmpTo.removeAllWords();
-			tmpTo.sensorData().setFeatures(std::vector<cv::KeyPoint>(), std::vector<cv::Point3f>(), cv::Mat());
+			tmpTo.sensorData().setFeatures(std::vector<cv::KeyPoint>(), std::vector<cv::Point3f>(), cv::Mat(), std::vector<cv::Matx33f>());
 		}
 		else if(useKnownCorrespondencesIfPossible)
 		{
@@ -3537,10 +3539,13 @@ Transform Memory::computeTransform(
 		{
 			std::multimap<int, int> words;
 			std::vector<cv::Point3f> words3DMap;
+			std::vector<cv::Matx33f> words3CovariancesMap;
 			std::vector<cv::KeyPoint> wordsMap;
 			cv::Mat wordsDescriptorsMap;
 
 			const std::multimap<int, Link> & links = fromS.getLinks();
+			// Decided by the reference signature to stay index-aligned with words3DMap.
+			const bool hasCov = !fromS.getWords3Covariances().empty();
 			if(!fromS.getWords3().empty())
 			{
 				const std::map<int, int> & wordsFrom = uMultimapToMapUnique(fromS.getWords());
@@ -3552,6 +3557,10 @@ Transform Memory::computeTransform(
 					{
 						words.insert(std::make_pair(jter->first, words.size()));
 						words3DMap.push_back(pt);
+						if(hasCov)
+						{
+							words3CovariancesMap.push_back(fromS.getWords3Covariances()[jter->second]);
+						}
 						wordsMap.push_back(fromS.getWordsKpts()[jter->second]);
 						wordsDescriptorsMap.push_back(fromS.getWordsDescriptors().row(jter->second));
 					}
@@ -3572,6 +3581,13 @@ Transform Memory::computeTransform(
 							continue;
 						}
 						const std::map<int, int> & wordsTo = uMultimapToMapUnique(s->getWords());
+						const bool sHasCov = !s->getWords3Covariances().empty();
+						// Rotation of the link, needed to bring the neighbour's covariances into fromS's frame
+						const Transform & linkT = iter->second.transform();
+						const cv::Matx33f linkR(
+								linkT.r11(), linkT.r12(), linkT.r13(),
+								linkT.r21(), linkT.r22(), linkT.r23(),
+								linkT.r31(), linkT.r32(), linkT.r33());
 						for(std::map<int, int>::const_iterator jter=wordsTo.begin(); jter!=wordsTo.end(); ++jter)
 						{
 							const cv::Point3f & pt = s->getWords3()[jter->second];
@@ -3580,7 +3596,15 @@ Transform Memory::computeTransform(
 								words.find(jter->first) == words.end())
 							{
 								words.insert(words.end(), std::make_pair(jter->first, words.size()));
-								words3DMap.push_back(util3d::transformPoint(pt, iter->second.transform()));
+								words3DMap.push_back(util3d::transformPoint(pt, linkT));
+								if(hasCov)
+								{
+									// A covariance rotates with the frame: Sigma' = R * Sigma * R^T.
+									// Zero is the "unknown" sentinel for a neighbour without covariances.
+									words3CovariancesMap.push_back(sHasCov ?
+											cv::Matx33f(linkR * s->getWords3Covariances()[jter->second] * linkR.t()) :
+											cv::Matx33f::zeros());
+								}
 								wordsMap.push_back(s->getWordsKpts()[jter->second]);
 								wordsDescriptorsMap.push_back(s->getWordsDescriptors().row(jter->second));
 							}
@@ -3590,7 +3614,7 @@ Transform Memory::computeTransform(
 			}
 			UDEBUG("words3DMap=%d", (int)words3DMap.size());
 			Signature tmpFrom2(fromS.id());
-			tmpFrom2.setWords(words, wordsMap, words3DMap, wordsDescriptorsMap);
+			tmpFrom2.setWords(words, wordsMap, words3DMap, words3CovariancesMap, wordsDescriptorsMap);
 
 			transform = _registrationPipeline->computeTransformationMod(tmpFrom2, tmpTo, guess, info);
 
@@ -4784,6 +4808,7 @@ void Memory::getNodeWordsAndGlobalDescriptors(int nodeId,
 		std::multimap<int, int> & words,
 		std::vector<cv::KeyPoint> & wordsKpts,
 		std::vector<cv::Point3f> & words3,
+		std::vector<cv::Matx33f> & words3Covariances,
 		cv::Mat & wordsDescriptors,
 		std::vector<GlobalDescriptor> & globalDescriptors) const
 {
@@ -4794,13 +4819,14 @@ void Memory::getNodeWordsAndGlobalDescriptors(int nodeId,
 		words = s->getWords();
 		wordsKpts = s->getWordsKpts();
 		words3 = s->getWords3();
+		words3Covariances = s->getWords3Covariances();
 		wordsDescriptors = s->getWordsDescriptors();
 		globalDescriptors = s->sensorData().globalDescriptors();
 
 		if(!words.empty() && wordsKpts.empty() && _dbDriver)
 		{
 			std::multimap<int, int> tmpWords;
-			_dbDriver->getLocalFeatures(nodeId, tmpWords, wordsKpts, words3, wordsDescriptors);
+			_dbDriver->getLocalFeatures(nodeId, tmpWords, wordsKpts, words3, words3Covariances, wordsDescriptors);
 			if(!tmpWords.empty() && !wordsKpts.empty())
 			{
 				UASSERT(tmpWords.size() == words.size());
@@ -5116,7 +5142,7 @@ void Memory::copyData(const Signature * from, Signature * to)
 	{
 		// words 2d
 		this->disableWordsRef(to->id());
-		to->setWords(from->getWords(), from->getWordsKpts(), from->getWords3(), from->getWordsDescriptors());
+		to->setWords(from->getWords(), from->getWordsKpts(), from->getWords3(), from->getWords3Covariances(), from->getWordsDescriptors());
 		std::list<int> id;
 		id.push_back(to->id());
 		this->enableWordsRef(id);
@@ -5500,7 +5526,7 @@ Signature * Memory::createSignature(const SensorData & inputData, const Transfor
 						warned = true;
 					}
 				}
-				data.setFeatures(std::vector<cv::KeyPoint>(), std::vector<cv::Point3f>(), cv::Mat());
+				data.setFeatures(std::vector<cv::KeyPoint>(), std::vector<cv::Point3f>(), cv::Mat(), std::vector<cv::Matx33f>());
 			}
 		}
 	}
@@ -5518,6 +5544,7 @@ Signature * Memory::createSignature(const SensorData & inputData, const Transfor
 
 	unsigned int preDecimation = 1;
 	std::vector<cv::Point3f> keypoints3D;
+	std::vector<cv::Matx33f> keypoints3DCovariances;
 	SensorData decimatedData;
 	UDEBUG("Received kpts=%d kpts3D=%d, descriptors=%d _useOdometryFeatures=%s",
 			(int)data.keypoints().size(), (int)data.keypoints3D().size(), data.descriptors().rows, _useOdometryFeatures?"true":"false");
@@ -5810,16 +5837,24 @@ Signature * Memory::createSignature(const SensorData & inputData, const Transfor
 			{
 				UDEBUG("Using provided 3d points (%d->%d)", (int)data.keypoints3D().size(), (int)keypoints.size());
 				keypoints3D.resize(keypoints.size());
+				bool hasCov = data.keypoints3DCovariances().size() == data.keypoints3D().size();
+				if(hasCov) keypoints3DCovariances.resize(keypoints.size());
+
 				for(size_t i=0; i<keypoints.size(); ++i)
 				{
 					UASSERT(keypoints[i].class_id < (int)data.keypoints3D().size());
 					keypoints3D[i] = data.keypoints3D()[keypoints[i].class_id];
+					if(hasCov) keypoints3DCovariances[i] = data.keypoints3DCovariances()[keypoints[i].class_id];
 				}
 			}
 			else if(useProvided3dPoints && keypoints.size() == data.keypoints3D().size())
 			{
 				UDEBUG("Using provided 3d points (%d)", (int)data.keypoints3D().size());
 				keypoints3D = data.keypoints3D();
+				if(data.keypoints3DCovariances().size() == data.keypoints3D().size())
+				{
+					keypoints3DCovariances = data.keypoints3DCovariances();
+				}
 			}
 			else if((!decimatedData.depthRaw().empty() && decimatedData.cameraModels().size() && decimatedData.cameraModels()[0].isValidForProjection()) ||
 				(!decimatedData.rightRaw().empty() && decimatedData.stereoCameraModels().size() && decimatedData.stereoCameraModels()[0].isValidForProjection()))
@@ -5829,9 +5864,14 @@ Signature * Memory::createSignature(const SensorData & inputData, const Transfor
 				if(stats) stats->addStatistic(Statistics::kTimingMemKeypoints_3D(), t*1000.0f);
 				UDEBUG("time keypoints 3D (%d) = %fs", (int)keypoints3D.size(), t);
 			}
+			if(keypoints3DCovariances.empty() && !keypoints3D.empty())
+			{
+				keypoints3DCovariances = _feature2D->generateKeypoints3DCovariance(decimatedData, keypoints, keypoints3D);
+				UDEBUG("keypoints 3D covariances: (%d)", (int)keypoints3DCovariances.size());
+			}
 			if(depthMask.empty() && (_feature2D->getMinDepth() > 0.0f || _feature2D->getMaxDepth() > 0.0f))
 			{
-				_feature2D->filterKeypointsByDepth(keypoints, descriptors, keypoints3D, _feature2D->getMinDepth(), _feature2D->getMaxDepth());
+				_feature2D->filterKeypointsByDepth(keypoints, descriptors, keypoints3D, keypoints3DCovariances, _feature2D->getMinDepth(), _feature2D->getMaxDepth());
 			}
 		}
 		else if(data.imageRaw().empty())
@@ -5858,10 +5898,12 @@ Signature * Memory::createSignature(const SensorData & inputData, const Transfor
 				data.descriptors().type());
 		keypoints = data.keypoints();
 		keypoints3D = data.keypoints3D();
+		keypoints3DCovariances = data.keypoints3DCovariances();
 		descriptors = data.descriptors().clone();
 
 		UASSERT(descriptors.empty() || descriptors.rows == (int)keypoints.size());
 		UASSERT(keypoints3D.empty() || keypoints3D.size() == keypoints.size());
+		UASSERT(keypoints3DCovariances.empty() || keypoints3DCovariances.size() == keypoints.size());
 
 		if(_feature2D->getMaxFeatures() >= 0 && !isIntermediateNode)
 		{
@@ -5872,6 +5914,7 @@ Signature * Memory::createSignature(const SensorData & inputData, const Transfor
 				if(data.cameraModels().size()>=1 || data.stereoCameraModels().size()>=1)
 					_feature2D->limitKeypoints(keypoints,
 						keypoints3D,
+						keypoints3DCovariances,
 						descriptors,
 						maxFeatures,
 						data.cameraModels().size()?cv::Size(data.cameraModels()[0].imageWidth()*data.cameraModels().size(),
@@ -5911,6 +5954,8 @@ Signature * Memory::createSignature(const SensorData & inputData, const Transfor
 				descriptorsValid.reserve(descriptors.rows);
 				std::vector<cv::Point3f> keypoints3DValid;
 				keypoints3DValid.reserve(keypoints3D.size());
+				std::vector<cv::Matx33f> keypoints3DCovariancesValid;
+				keypoints3DCovariancesValid.reserve(keypoints3DCovariances.size());
 
 				//undistort keypoints before projection (RGB-D)
 				if(data.cameraModels().size() == 1)
@@ -5960,6 +6005,10 @@ Signature * Memory::createSignature(const SensorData & inputData, const Transfor
 							if(!keypoints3D.empty())
 							{
 								keypoints3DValid.push_back(keypoints3D.at(i));
+							}
+							if(!keypoints3DCovariances.empty())
+							{
+								keypoints3DCovariancesValid.push_back(keypoints3DCovariances.at(i));
 							}
 						}
 					}
@@ -6029,6 +6078,10 @@ Signature * Memory::createSignature(const SensorData & inputData, const Transfor
 							{
 								keypoints3DValid.push_back(keypoints3D.at(i));
 							}
+							if(!keypoints3DCovariances.empty())
+							{
+								keypoints3DCovariancesValid.push_back(keypoints3DCovariances.at(i));
+							}
 						}
 					}
 				}
@@ -6036,6 +6089,7 @@ Signature * Memory::createSignature(const SensorData & inputData, const Transfor
 				keypoints = keypointsValid;
 				descriptors = descriptorsValid;
 				keypoints3D = keypoints3DValid;
+				keypoints3DCovariances = keypoints3DCovariancesValid;
 
 				t = timer.ticks();
 				if(stats) stats->addStatistic(Statistics::kTimingMemRectification(), t*1000.0f);
@@ -6051,9 +6105,13 @@ Signature * Memory::createSignature(const SensorData & inputData, const Transfor
 			{
 				keypoints3D = _feature2D->generateKeypoints3D(data, keypoints);
 			}
+			if(keypoints3DCovariances.empty() && !keypoints3D.empty())
+			{
+				keypoints3DCovariances = _feature2D->generateKeypoints3DCovariance(data, keypoints, keypoints3D);
+			}
 			if(_feature2D->getMinDepth() > 0.0f || _feature2D->getMaxDepth() > 0.0f)
 			{
-				_feature2D->filterKeypointsByDepth(keypoints, descriptors, keypoints3D, _feature2D->getMinDepth(), _feature2D->getMaxDepth());
+				_feature2D->filterKeypointsByDepth(keypoints, descriptors, keypoints3D, keypoints3DCovariances, _feature2D->getMinDepth(), _feature2D->getMaxDepth());
 			}
 			t = timer.ticks();
 			if(stats) stats->addStatistic(Statistics::kTimingMemKeypoints_3D(), t*1000.0f);
@@ -6211,6 +6269,7 @@ Signature * Memory::createSignature(const SensorData & inputData, const Transfor
 	std::multimap<int, int> words;
 	std::vector<cv::KeyPoint> wordsKpts;
 	std::vector<cv::Point3f> words3D;
+	std::vector<cv::Matx33f> words3Covariances;
 	cv::Mat wordsDescriptors;
 	int words3DValid = 0;
 	if(wordIds.size() > 0)
@@ -6218,6 +6277,7 @@ Signature * Memory::createSignature(const SensorData & inputData, const Transfor
 		UASSERT(wordIds.size() == keypoints.size());
 		UASSERT(descriptors.rows == 0 || descriptors.rows == (int)wordIds.size());
 		UASSERT(keypoints3D.size() == 0 || keypoints3D.size() == wordIds.size());
+		UASSERT(keypoints3DCovariances.size() == 0 || keypoints3DCovariances.size() == wordIds.size());
 		unsigned int i=0;
 		float decimationRatio = float(preDecimation) / float(_imagePostDecimation);
 		double log2value = log(double(preDecimation))/log(2.0);
@@ -6242,6 +6302,10 @@ Signature * Memory::createSignature(const SensorData & inputData, const Transfor
 				{
 					++words3DValid;
 				}
+			}
+			if(keypoints3DCovariances.size())
+			{
+				words3Covariances.push_back(keypoints3DCovariances.at(i));
 			}
 			if(!descriptors.empty() && _rawDescriptorsKept)
 			{
@@ -6414,7 +6478,7 @@ Signature * Memory::createSignature(const SensorData & inputData, const Transfor
 				uniqueWordsDescriptors.push_back(previousS->getWordsDescriptors().row(iter->second));
 			}
 			cpPrevious.sensorData().setCameraModels(previousS->sensorData().cameraModels());
-			cpPrevious.setWords(uniqueWords, uniqueWordsKpts, std::vector<cv::Point3f>(), uniqueWordsDescriptors);
+			cpPrevious.setWords(uniqueWords, uniqueWordsKpts, std::vector<cv::Point3f>(), std::vector<cv::Matx33f>(), uniqueWordsDescriptors); 
 			Signature cpCurrent(1);
 			uniqueWordsOld = uMultimapToMapUnique(words);
 			uniqueWordsKpts.clear();
@@ -6428,7 +6492,7 @@ Signature * Memory::createSignature(const SensorData & inputData, const Transfor
 			}
 			cpCurrent.sensorData().setCameraModels(cameraModels);
 			// This will force comparing descriptors between both images directly
-			cpCurrent.setWords(uniqueWords, uniqueWordsKpts, std::vector<cv::Point3f>(), uniqueWordsDescriptors);
+			cpCurrent.setWords(uniqueWords, uniqueWordsKpts, std::vector<cv::Point3f>(), std::vector<cv::Matx33f>(), uniqueWordsDescriptors); 
 
 			// The following is used only to re-estimate the correspondences, the returned transform is ignored
 			Transform tmpt;
@@ -6480,6 +6544,7 @@ Signature * Memory::createSignature(const SensorData & inputData, const Transfor
 			float bad_point = std::numeric_limits<float>::quiet_NaN ();
 			UASSERT(words3D.size() == 0 || words.size() == words3D.size());
 			bool words3DWasEmpty = words3D.empty();
+			bool words3CovariancesWasEmpty = words3Covariances.empty();
 			int added3DPointsWithoutDepth = 0;
 			for(std::multimap<int, int>::const_iterator iter=words.begin(); iter!=words.end(); ++iter)
 			{
@@ -6495,10 +6560,20 @@ Signature * Memory::createSignature(const SensorData & inputData, const Transfor
 					{
 						words3D.push_back(cv::Point3f(bad_point,bad_point,bad_point));
 					}
+					if(!words3CovariancesWasEmpty)
+					{
+						// No sensor-derived uncertainty: zero is the "unknown" sentinel.
+						words3Covariances.push_back(cv::Matx33f::zeros());
+					}
 				}
 				else if(!util3d::isFinite(words3D[iter->second]) && jter != inliers.end())
 				{
 					words3D[iter->second] = jter->second;
+					if(!words3CovariancesWasEmpty && iter->second < (int)words3Covariances.size())
+					{
+						// Same as above: the depth-derived covariance no longer describes this point.
+						words3Covariances[iter->second] = cv::Matx33f::zeros();
+					}
 					++added3DPointsWithoutDepth;
 				}
 			}
@@ -6801,6 +6876,7 @@ Signature * Memory::createSignature(const SensorData & inputData, const Transfor
 	{
 		s->setWords(words, wordsKpts,
 				_reextractLoopClosureFeatures?std::vector<cv::Point3f>():words3D,
+				_reextractLoopClosureFeatures?std::vector<cv::Matx33f>():words3Covariances, 
 				_reextractLoopClosureFeatures?cv::Mat():wordsDescriptors);
 
 		s->sensorData().setLaserScan(laserScan, false);

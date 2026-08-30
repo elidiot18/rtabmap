@@ -234,6 +234,13 @@ public:
 			std::vector<cv::Point3f> & keypoints3D,
 			float minDepth,
 			float maxDepth);
+	static void filterKeypointsByDepth(
+			std::vector<cv::KeyPoint> & keypoints,
+			cv::Mat & descriptors,
+			std::vector<cv::Point3f> & keypoints3D,
+			std::vector<cv::Matx33f> & keypoints3DCovariances,
+			float minDepth,
+			float maxDepth);
 
 	/** @brief Keeps keypoints with stereo disparity ≥ @p minDisparity. */
 	static void filterKeypointsByDisparity(
@@ -250,6 +257,7 @@ public:
 	static void limitKeypoints(std::vector<cv::KeyPoint> & keypoints, int maxKeypoints, const cv::Size & imageSize = cv::Size(), bool ssc = false);
 	static void limitKeypoints(std::vector<cv::KeyPoint> & keypoints, cv::Mat & descriptors, int maxKeypoints, const cv::Size & imageSize = cv::Size(), bool ssc = false);
 	static void limitKeypoints(std::vector<cv::KeyPoint> & keypoints, std::vector<cv::Point3f> & keypoints3D, cv::Mat & descriptors, int maxKeypoints, const cv::Size & imageSize = cv::Size(), bool ssc = false);
+	static void limitKeypoints(std::vector<cv::KeyPoint> & keypoints, std::vector<cv::Point3f> & keypoints3D, std::vector<cv::Matx33f> & keypoints3DCovariances, cv::Mat & descriptors, int maxKeypoints, const cv::Size & imageSize, bool ssc);
 	static void limitKeypoints(const std::vector<cv::KeyPoint> & keypoints, std::vector<bool> & inliers, int maxKeypoints, const cv::Size & imageSize = cv::Size(), bool ssc = false);
 	static void limitKeypoints(const std::vector<cv::KeyPoint> & keypoints, std::vector<bool> & inliers, int maxKeypoints, const cv::Size & imageSize, int gridRows, int gridCols, bool ssc = false);
 
@@ -279,6 +287,32 @@ public:
 	std::vector<cv::Point3f> generateKeypoints3D(
 			const SensorData & data,
 			const std::vector<cv::KeyPoint> & keypoints) const;
+
+	/**
+	 * @brief Builds a 3x3 position covariance for each 3D keypoint, expressed in the base frame.
+	 *
+	 * The covariance is built around the ray through the keypoint.
+	 *
+	 * The across-ray term @c sigma_t always comes from keypoint localization noise, the along-ray term
+	 * @c sigma_r is chosen as follows: the per-pixel depth confidence map if there is one, else the stereo
+	 * disparity model if the node carries a stereo calibration, else the flat Kp/DepthCovRangeVariance.
+	 *
+	 * The resulting camera-frame covariance is then rotated into the base frame to match @p keypoints3D.
+	 *
+	 * @param data Sensor data the keypoints were extracted from.
+	 * @param keypoints Keypoints in the image.
+	 * @param keypoints3D Their 3D positions, in the base frame.
+	 * @return One covariance per keypoint, or an empty vector when Kp/DepthCovEnabled is false.
+	 *         Keypoints with a non-finite 3D position get a zero covariance.
+	 *
+	 * @see Kp/DepthCovModel for how the along-ray term scales with range.
+	 */
+	std::vector<cv::Matx33f> generateKeypoints3DCovariance(
+		const SensorData & data,
+		const std::vector<cv::KeyPoint> & keypoints,
+		const std::vector<cv::Point3f> & keypoints3D) const;
+
+	bool isDepthCovarianceEnabled() const {return _depthCovEnabled;}
 
 	virtual void parseParameters(const ParametersMap & parameters);
 	virtual const ParametersMap & getParameters() const {return parameters_;}
@@ -312,6 +346,17 @@ private:
 	double _subPixEps;
 	int gridRows_;
 	int gridCols_;
+	// Depth sensor noise model, see generateKeypoints3DCovariance()
+	bool _depthCovEnabled;
+	float _depthCovPixelVariance;
+	int _depthCovModel;
+	float _depthCovRangeVariance;
+	float _depthCovDisparityVariance;
+	float _depthCovLowConfVariance;
+	float _depthCovMediumConfVariance;
+	float _depthCovHighConfVariance;
+	int _depthCovLowConfMax;
+	int _depthCovMediumConfMax;
 	// Stereo stuff
 	Stereo * _stereo;
 };

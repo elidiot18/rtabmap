@@ -5905,12 +5905,13 @@ Signature Rtabmap::getSignatureCopy(int id, bool images, bool scan, bool userDat
 			std::multimap<int, int> words;
 			std::vector<cv::KeyPoint> wordsKpts;
 			std::vector<cv::Point3f> words3;
+			std::vector<cv::Matx33f> words3Covariances;
 			cv::Mat wordsDescriptors;
 			std::vector<rtabmap::GlobalDescriptor> globalDescriptors;
-			_memory->getNodeWordsAndGlobalDescriptors(id, words, wordsKpts, words3, wordsDescriptors, globalDescriptors);
+			_memory->getNodeWordsAndGlobalDescriptors(id, words, wordsKpts, words3, words3Covariances, wordsDescriptors, globalDescriptors);
 			if(withWords)
 			{
-				s.setWords(words, wordsKpts, words3, wordsDescriptors);
+				s.setWords(words, wordsKpts, words3, words3Covariances, wordsDescriptors);
 			}
 			if(withGlobalDescriptors)
 			{

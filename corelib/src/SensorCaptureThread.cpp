@@ -702,7 +702,7 @@ void SensorCaptureThread::postUpdate(SensorData * dataPtr, SensorCaptureInfo * i
 				kpts[i].size /= _imageDecimation;
 				kpts[i].octave -= log2value;
 			}
-			data.setFeatures(kpts, data.keypoints3D(), data.descriptors());
+			data.setFeatures(kpts, data.keypoints3D(), data.descriptors(), data.keypoints3DCovariances());
 		}
 		if(info) info->timeImageDecimation = timer.ticks();
 	}
@@ -1039,6 +1039,7 @@ void SensorCaptureThread::postUpdate(SensorData * dataPtr, SensorCaptureInfo * i
 		std::vector<cv::KeyPoint> keypoints = _featureDetector->generateKeypoints(grayScaleImg, depthMask);
 		cv::Mat descriptors;
 		std::vector<cv::Point3f> keypoints3D;
+		std::vector<cv::Matx33f> keypoints3DCovariances;
 		if(!keypoints.empty())
 		{
 			descriptors = _featureDetector->generateDescriptors(grayScaleImg, keypoints);
@@ -1046,9 +1047,13 @@ void SensorCaptureThread::postUpdate(SensorData * dataPtr, SensorCaptureInfo * i
 			{
 				keypoints3D = _featureDetector->generateKeypoints3D(data, keypoints);
 			}
+			if(!keypoints3D.empty())
+			{
+				keypoints3DCovariances = _featureDetector->generateKeypoints3DCovariance(data, keypoints, keypoints3D);
+			}
 		}
 
-		data.setFeatures(keypoints, keypoints3D, descriptors);
+		data.setFeatures(keypoints, keypoints3D, descriptors, keypoints3DCovariances);
 	}
 }
 

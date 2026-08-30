@@ -91,7 +91,12 @@ bool RTABMAP_CORE_EXPORT ransacDeterministicSeedEnabled();
  * @param matchesOut Optional output vector of all matched IDs used (regardless of inlier status).
  * @param inliersOut Optional output vector of matched IDs that were determined to be inliers.
  * @param splitLinearCovarianceComponents Whether to split and compute variance for X, Y, Z components separately.
- *
+ * @param covariances3A Optional map of 3D point covariances in frame A, indexed by feature ID, in base_link frame coordinates.
+ * @param useMsac If true, uses MSAC instead of RANSAC for robust estimation.
+ * @param pixelVariance Typical variance of matches in pixel space. Use as default pixel variance in case of missing data.
+ * @param msacUseFeatureCovariance If true, the MSac estimator scores correspondences by a Mahalanobis
+ *        distance built from their 3D covariance rather than by plain reprojection error. Only has an effect
+ *        when @p useMsac is true.
  * @return The estimated transformation from frame B to frame A. If estimation fails or is rejected due to variance,
  *         a null transform is returned (i.e., `transform.isNull()` will be true).
  *
@@ -99,8 +104,9 @@ bool RTABMAP_CORE_EXPORT ransacDeterministicSeedEnabled();
  * - If `words3B` is provided, 3D variance is computed by comparing reprojected points to actual transformed points.
  * - If `words3B` is empty, variance is estimated using reprojection error only.
  * - The function assumes the camera model's local transform is known and factored into the pose estimation.
+ * - The function uses either OpenCV's `cv::solvePnPRansac` or OpenGV's multi-camera PnP solver depending on the input.
  *
- * @see cv::solvePnPRansac
+ * @see cv::solvePnPRansac, cv::custom::solvePnPMsac
  */
 Transform RTABMAP_CORE_EXPORT estimateMotion3DTo2D(
 			const std::map<int, cv::Point3f> & words3A,
@@ -118,7 +124,11 @@ Transform RTABMAP_CORE_EXPORT estimateMotion3DTo2D(
 			cv::Mat * covariance = 0, // mean reproj error if words3B is not set
 			std::vector<int> * matchesOut = 0,
 			std::vector<int> * inliersOut = 0,
-			bool splitLinearCovarianceComponents = false);
+			bool splitLinearCovarianceComponents = false,
+			const std::map<int, cv::Matx33f>& covariances3A = std::map<int, cv::Matx33f>(),
+			bool useMsac = false,
+			float pixelVariance = 2 * 2,
+			bool msacUseFeatureCovariance = false);
 
 /**
  * @brief Estimates the 3D-to-2D motion (pose) transformation between a set of 3D points and their corresponding 2D keypoints using the OpenGV library.
@@ -272,6 +282,63 @@ void RTABMAP_CORE_EXPORT solvePnPRansac(
 		int flags,
 		int refineIterations = 1,
 		float refineSigma = 3.0f);
+
+/**
+ * @brief Estimates the camera pose using an MSAC-like PnP algorithm and optionally refines it.
+ *
+ * This function is a fork of util3d::solvePnPRansac where the MSAC algorithm is used instead.
+ * Optionally, feature depth confidence, in the form of 3d covariances, can be used for the MSAC
+ * scoring, and the refinement steps. See util3d::solvePnPRansac.
+ *
+ * @param objectPoints        A vector of 3D points in the object coordinate space.
+ * @param imagePoints         A vector of corresponding 2D points in the image plane.
+ * @param cameraMatrix        The camera intrinsic matrix (3x3).
+ * @param distCoeffs          Vector of distortion coefficients (k1, k2, p1, p2, k3, ...).
+ * @param covariances3A       Vector of 3*3 covariances of the input points in base_link frame.
+ * @param rvec                Output rotation vector (Rodrigues form).
+ * @param tvec                Output translation vector.
+ * @param useExtrinsicGuess   If true, uses the provided rvec and tvec as an initial guess.
+ * @param iterationsCount     The number of MSac iterations.
+ * @param reprojectionError   Maximum reprojection error (pixels) for a correspondence to be an
+ *                            inlier. It is converted into the chi-square units the cost is
+ *                            expressed in, as reprojectionError^2/pixelVariance. Pass 0 to gate
+ *                            on the 95% quantile of a chi-square with 2 dof instead.
+ * @param minInliersCount     Minimum number of inliers required to accept a model.
+ * @param pixelVariance       Typical pixel variance for matches.
+ * @param inliers             Output vector of indices of inlier points.
+ * @param flags               Method for solving PnP (`cv::SOLVEPNP_*` flags).
+ * @param refineIterations    Number of refinement iterations after the consensus step.
+ * @param refineSigma         Multiplier for the reprojection error standard deviation to define adaptive inlier threshold.
+ *
+ * @note This function is a custom MSac implementation forked from OpenCV's `solvePnPRansac`
+ *       and `ptsetreg.cpp`. After the consensus step the pose is optionally refined by
+ *       minimizing the (Mahalanobis) reprojection error over the inliers.
+ *       Which cost is used is decided by @p covariances3A : when it is empty the error is
+ *       a plain reprojection distance scaled by @p pixelVariance, and when it is populated the
+ *       error is a Mahalanobis distance using each point's projected covariance.
+ * 
+ * @warning Refinement stops early when the inlier set stops changing, starts oscillating between
+ *          two sizes, or drops below @p minInliersCount, in which case the pre-refinement pose is kept.
+ *
+ * @see cv::solvePnP, cv::solvePnPRansac
+ */
+void RTABMAP_CORE_EXPORT solvePnPMsac(
+		const std::vector<cv::Point3f> & objectPoints,
+		const std::vector<cv::Point2f> & imagePoints,
+		const cv::Mat & cameraMatrix,
+		const cv::Mat & distCoeffs,
+		const std::vector<cv::Matx33f> & covariances3A,
+		cv::Mat & rvec,
+		cv::Mat & tvec,
+		bool useExtrinsicGuess,
+		int iterationsCount,
+		float reprojectionError,
+		int minInliersCount,
+		float pixelVariance,
+		std::vector<int> & inliers,
+		int flags,
+		int refineIterations,
+		float refineSigma);
 
 } // namespace util3d
 } // namespace rtabmap

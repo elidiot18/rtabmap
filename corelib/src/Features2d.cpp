@@ -28,6 +28,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "rtabmap/core/Features2d.h"
 #include "rtabmap/core/util3d.h"
 #include "rtabmap/core/util3d_features.h"
+#include "rtabmap/core/util3d_transforms.h"
 #include "rtabmap/core/Stereo.h"
 #include "rtabmap/core/util2d.h"
 #include "rtabmap/utilite/UStl.h"
@@ -204,6 +205,65 @@ void Feature2D::filterKeypointsByDepth(
 	validKeypoints3D.resize(oi);
 	keypoints = validKeypoints;
 	keypoints3D = validKeypoints3D;
+	if(!descriptors.empty())
+	{
+		descriptors = validDescriptors.rowRange(0, oi).clone();
+	}
+}
+
+void Feature2D::filterKeypointsByDepth(
+		std::vector<cv::KeyPoint> & keypoints,
+		cv::Mat & descriptors,
+		std::vector<cv::Point3f> & keypoints3D,
+		std::vector<cv::Matx33f> & keypoints3DCovariances,
+		float minDepth,
+		float maxDepth)
+{
+	UDEBUG("");
+	//remove all keypoints/descriptors with no valid 3D points
+	UASSERT(((int)keypoints.size() == descriptors.rows || descriptors.empty()) &&
+			keypoints3D.size() == keypoints.size() &&
+			(keypoints3DCovariances.empty() || keypoints3DCovariances.size() == keypoints.size()));
+	std::vector<cv::KeyPoint> validKeypoints(keypoints.size());
+	std::vector<cv::Point3f> validKeypoints3D(keypoints.size());
+	std::vector<cv::Matx33f> validKeypoints3DCovariance(keypoints3DCovariances.size());
+	cv::Mat validDescriptors(descriptors.size(), descriptors.type());
+
+	int oi=0;
+	float minDepthSqr = minDepth * minDepth;
+	float maxDepthSqr = maxDepth * maxDepth;
+	for(unsigned int i=0; i<keypoints3D.size(); ++i)
+	{
+		cv::Point3f & pt = keypoints3D[i];
+		if(util3d::isFinite(pt))
+		{
+			float distSqr = pt.x*pt.x+pt.y*pt.y+pt.z*pt.z;
+			if(distSqr >= minDepthSqr && (maxDepthSqr==0.0f || distSqr <= maxDepthSqr))
+			{
+				validKeypoints[oi] = keypoints[i];
+				validKeypoints3D[oi] = pt;
+				if(!keypoints3DCovariances.empty())
+				{
+					validKeypoints3DCovariance[oi] = keypoints3DCovariances[i];
+				}
+				if(!descriptors.empty())
+				{
+					descriptors.row(i).copyTo(validDescriptors.row(oi));
+				}
+				++oi;
+			}
+		}
+	}
+	UDEBUG("Removed %d invalid 3D points", (int)keypoints3D.size()-oi);
+	validKeypoints.resize(oi);
+	validKeypoints3D.resize(oi);
+	keypoints = validKeypoints;
+	keypoints3D = validKeypoints3D;
+	if(!keypoints3DCovariances.empty())
+	{
+		validKeypoints3DCovariance.resize(oi);
+		keypoints3DCovariances = validKeypoints3DCovariance;
+	}
 	if(!descriptors.empty())
 	{
 		descriptors = validDescriptors.rowRange(0, oi).clone();
@@ -408,6 +468,147 @@ void Feature2D::limitKeypoints(std::vector<cv::KeyPoint> & keypoints, std::vecto
 	}
 }
 
+void Feature2D::limitKeypoints(std::vector<cv::KeyPoint> & keypoints, std::vector<cv::Point3f> & keypoints3D, std::vector<cv::Matx33f> & keypoints3DCovariances, cv::Mat & descriptors, int maxKeypoints, const cv::Size & imageSize, bool ssc)
+{
+	UASSERT_MSG((int)keypoints.size() == descriptors.rows || descriptors.rows == 0, uFormat("keypoints=%d descriptors=%d", (int)keypoints.size(), descriptors.rows).c_str());
+	UASSERT_MSG(keypoints.size() == keypoints3D.size() || keypoints3D.size() == 0, uFormat("keypoints=%d keypoints3D=%d", (int)keypoints.size(), (int)keypoints3D.size()).c_str());
+	UASSERT_MSG(keypoints.size() == keypoints3DCovariances.size() || keypoints3DCovariances.size() == 0, uFormat("keypoints=%d keypoints3DCovariances=%d", (int)keypoints.size(), (int)keypoints3DCovariances.size()).c_str());
+	if(maxKeypoints > 0 && (int)keypoints.size() > maxKeypoints)
+	{
+		UTimer timer;
+		int removed;
+		std::vector<cv::KeyPoint> kptsTmp;
+		std::vector<cv::Point3f> kpts3DTmp;
+		std::vector<cv::Matx33f> kptsCovTmp;
+		cv::Mat descriptorsTmp;
+		if(ssc)
+		{
+			ULOGGER_DEBUG("too much words (%d), removing words with SSC", (int)keypoints.size());
+
+			// Sorting keypoints by deacreasing order of strength
+			std::vector<float> responseVector;
+			for (unsigned int i = 0; i < keypoints.size(); i++)
+			{
+				responseVector.push_back(keypoints[i].response);
+			}
+			std::vector<int> indx(responseVector.size());
+			std::iota(std::begin(indx), std::end(indx), 0);
+
+#if CV_MAJOR_VERSION >= 4
+			cv::sortIdx(responseVector, indx, cv::SORT_DESCENDING);
+#else
+			cv::sortIdx(responseVector, indx, CV_SORT_DESCENDING);
+#endif
+
+			static constexpr float tolerance = 0.1;
+			auto ResultVec = util2d::SSC(keypoints, maxKeypoints, tolerance, imageSize.width, imageSize.height, indx);
+			removed = keypoints.size()-ResultVec.size();
+			// retrieve final keypoints
+			kptsTmp.resize(ResultVec.size());
+			if(!keypoints3D.empty())
+			{
+				kpts3DTmp.resize(ResultVec.size());
+			}
+			if(!keypoints3DCovariances.empty())
+			{
+				kptsCovTmp.resize(ResultVec.size());
+			}
+			if(descriptors.rows)
+			{
+				descriptorsTmp = cv::Mat(ResultVec.size(), descriptors.cols, descriptors.type());
+			}
+			for(unsigned int k=0; k<ResultVec.size(); ++k)
+			{
+				kptsTmp[k] = keypoints[ResultVec[k]];
+				if(keypoints3D.size())
+				{
+					kpts3DTmp[k] = keypoints3D[ResultVec[k]];
+				}
+				if(keypoints3DCovariances.size())
+				{
+					kptsCovTmp[k] = keypoints3DCovariances[ResultVec[k]];
+				}
+				if(descriptors.rows)
+				{
+					if(descriptors.type() == CV_32FC1)
+					{
+						memcpy(descriptorsTmp.ptr<float>(k), descriptors.ptr<float>(ResultVec[k]), descriptors.cols*sizeof(float));
+					}
+					else
+					{
+						memcpy(descriptorsTmp.ptr<char>(k), descriptors.ptr<char>(ResultVec[k]), descriptors.cols*sizeof(char));
+					}
+				}
+			}
+		}
+		else
+		{
+			ULOGGER_DEBUG("too many words (%d), removing words with the hessian threshold", (int)keypoints.size());
+			// Remove words under the new hessian threshold
+
+			// Sort words by hessian
+			std::multimap<float, int> hessianMap; // <hessian,id>
+			for(unsigned int i = 0; i <keypoints.size(); ++i)
+			{
+				//Keep track of the data, to be easier to manage the data in the next step
+				hessianMap.insert(std::pair<float, int>(fabs(keypoints[i].response), i));
+			}
+
+			// Remove them from the signature
+			removed = (int)hessianMap.size()-maxKeypoints;
+			std::multimap<float, int>::reverse_iterator iter = hessianMap.rbegin();
+			kptsTmp.resize(maxKeypoints);
+			if(!keypoints3D.empty())
+			{
+				kpts3DTmp.resize(maxKeypoints);
+			}
+			if(!keypoints3DCovariances.empty())
+			{
+				kptsCovTmp.resize(maxKeypoints);
+			}
+			if(descriptors.rows)
+			{
+				descriptorsTmp = cv::Mat(maxKeypoints, descriptors.cols, descriptors.type());
+			}
+			for(unsigned int k=0; k<kptsTmp.size() && iter!=hessianMap.rend(); ++k, ++iter)
+			{
+				kptsTmp[k] = keypoints[iter->second];
+				if(keypoints3D.size())
+				{
+					kpts3DTmp[k] = keypoints3D[iter->second];
+				}
+				if(keypoints3DCovariances.size())
+				{
+					kptsCovTmp[k] = keypoints3DCovariances[iter->second];
+				}
+				if(descriptors.rows)
+				{
+					if(descriptors.type() == CV_32FC1)
+					{
+						memcpy(descriptorsTmp.ptr<float>(k), descriptors.ptr<float>(iter->second), descriptors.cols*sizeof(float));
+					}
+					else
+					{
+						memcpy(descriptorsTmp.ptr<char>(k), descriptors.ptr<char>(iter->second), descriptors.cols*sizeof(char));
+					}
+				}
+			}
+		}
+		ULOGGER_DEBUG("%d keypoints removed, (kept %d), minimum response=%f", removed, (int)kptsTmp.size(), !ssc&&kptsTmp.size()?kptsTmp.back().response:0.0f);
+		ULOGGER_DEBUG("removing words time = %f s", timer.ticks());
+		keypoints = kptsTmp;
+		keypoints3D = kpts3DTmp;
+		if(!keypoints3DCovariances.empty())
+		{
+			keypoints3DCovariances = kptsCovTmp;
+		}
+		if(descriptors.rows)
+		{
+			descriptors = descriptorsTmp;
+		}
+	}
+}
+
 void Feature2D::limitKeypoints(const std::vector<cv::KeyPoint> & keypoints, std::vector<bool> & inliers, int maxKeypoints, const cv::Size & imageSize, bool ssc)
 {
 	if(maxKeypoints > 0 && (int)keypoints.size() > maxKeypoints)
@@ -537,7 +738,17 @@ Feature2D::Feature2D(const ParametersMap & parameters) :
 		_subPixIterations(Parameters::defaultKpSubPixIterations()),
 		_subPixEps(Parameters::defaultKpSubPixEps()),
 		gridRows_(Parameters::defaultKpGridRows()),
-		gridCols_(Parameters::defaultKpGridCols())
+		gridCols_(Parameters::defaultKpGridCols()),
+		_depthCovEnabled(Parameters::defaultKpDepthCovEnabled()),
+		_depthCovPixelVariance(Parameters::defaultKpDepthCovPixelVariance()),
+		_depthCovModel(Parameters::defaultKpDepthCovModel()),
+		_depthCovRangeVariance(Parameters::defaultKpDepthCovRangeVariance()),
+		_depthCovDisparityVariance(Parameters::defaultKpDepthCovDisparityVariance()),
+		_depthCovLowConfVariance(Parameters::defaultKpDepthCovLowConfVariance()),
+		_depthCovMediumConfVariance(Parameters::defaultKpDepthCovMediumConfVariance()),
+		_depthCovHighConfVariance(Parameters::defaultKpDepthCovHighConfVariance()),
+		_depthCovLowConfMax(Parameters::defaultKpDepthCovLowConfMax()),
+		_depthCovMediumConfMax(Parameters::defaultKpDepthCovMediumConfMax())
 {
 	_stereo = new Stereo(parameters);
 	this->parseParameters(parameters);
@@ -559,8 +770,26 @@ void Feature2D::parseParameters(const ParametersMap & parameters)
 	Parameters::parse(parameters, Parameters::kKpSubPixEps(), _subPixEps);
 	Parameters::parse(parameters, Parameters::kKpGridRows(), gridRows_);
 	Parameters::parse(parameters, Parameters::kKpGridCols(), gridCols_);
+	Parameters::parse(parameters, Parameters::kKpDepthCovEnabled(), _depthCovEnabled);
+	Parameters::parse(parameters, Parameters::kKpDepthCovPixelVariance(), _depthCovPixelVariance);
+	Parameters::parse(parameters, Parameters::kKpDepthCovModel(), _depthCovModel);
+	Parameters::parse(parameters, Parameters::kKpDepthCovRangeVariance(), _depthCovRangeVariance);
+	Parameters::parse(parameters, Parameters::kKpDepthCovDisparityVariance(), _depthCovDisparityVariance);
+	Parameters::parse(parameters, Parameters::kKpDepthCovLowConfVariance(), _depthCovLowConfVariance);
+	Parameters::parse(parameters, Parameters::kKpDepthCovMediumConfVariance(), _depthCovMediumConfVariance);
+	Parameters::parse(parameters, Parameters::kKpDepthCovHighConfVariance(), _depthCovHighConfVariance);
+	Parameters::parse(parameters, Parameters::kKpDepthCovLowConfMax(), _depthCovLowConfMax);
+	Parameters::parse(parameters, Parameters::kKpDepthCovMediumConfMax(), _depthCovMediumConfMax);
 
 	UASSERT(gridRows_ >= 1 && gridCols_>=1);
+	if(_depthCovEnabled && _depthCovPixelVariance <= 0.0f)
+	{
+		UWARN("%s must be > 0 (got %f): a zero pixel variance makes every feature covariance "
+			  "rank deficient and the covariance-aware estimators degenerate. Forcing it to %f.",
+			  Parameters::kKpDepthCovPixelVariance().c_str(), _depthCovPixelVariance,
+			  Parameters::defaultKpDepthCovPixelVariance());
+		_depthCovPixelVariance = Parameters::defaultKpDepthCovPixelVariance();
+	}
 
 	// convert ROI from string to vector
 	ParametersMap::const_iterator iter;
@@ -1175,6 +1404,170 @@ std::vector<cv::Point3f> Feature2D::generateKeypoints3D(
 	}
 
 	return keypoints3D;
+}
+
+std::vector<cv::Matx33f> Feature2D::generateKeypoints3DCovariance(
+		const SensorData & data,
+		const std::vector<cv::KeyPoint> & keypoints,
+		const std::vector<cv::Point3f> & keypoints3D) const
+{
+	std::vector<cv::Matx33f> covariances;
+
+	if(!_depthCovEnabled || keypoints.empty())
+	{
+		return covariances;
+	}
+
+	UASSERT_MSG(keypoints3D.size() == keypoints.size(),
+			uFormat("keypoints=%d keypoints3D=%d", (int)keypoints.size(), (int)keypoints3D.size()).c_str());
+
+	std::vector<CameraModel> cameraModels = data.cameraModels();
+	std::vector<double> baselines;
+	if(cameraModels.empty())
+	{
+		for(size_t i=0; i<data.stereoCameraModels().size(); ++i)
+		{
+			cameraModels.push_back(data.stereoCameraModels()[i].left());
+			baselines.push_back(data.stereoCameraModels()[i].baseline());
+		}
+	}
+	if(cameraModels.empty() || !cameraModels[0].isValidForProjection())
+	{
+		UWARN("%s is enabled but the sensor data has no valid camera model, no feature covariance generated.",
+				Parameters::kKpDepthCovEnabled().c_str());
+		return covariances;
+	}
+
+	const cv::Mat & depthConfidence = data.depthConfidenceRaw();
+	const bool hasConfidence = !depthConfidence.empty();
+	const bool hasBaseline = !baselines.empty() && baselines[0] > 0.0;
+
+	covariances.resize(keypoints.size(), cv::Matx33f::zeros());
+
+	float subImageWidth = 0.0f;
+	float rgbToDepthFactorX = 1.0f;
+	float rgbToDepthFactorY = 1.0f;
+	if(hasConfidence)
+	{
+		UASSERT(int((depthConfidence.cols/cameraModels.size())*cameraModels.size()) == depthConfidence.cols);
+		subImageWidth = depthConfidence.cols/cameraModels.size();
+		rgbToDepthFactorX = 1.0f/(cameraModels[0].imageWidth()>0?float(cameraModels[0].imageWidth())/subImageWidth:1.0f);
+		rgbToDepthFactorY = 1.0f/(cameraModels[0].imageHeight()>0?float(cameraModels[0].imageHeight())/float(depthConfidence.rows):1.0f);
+	}
+
+	const float rgbSubImageWidth = cameraModels[0].imageWidth() > 0 ?
+			float(cameraModels[0].imageWidth()) : 0.0f;
+
+	int lowCount = 0, medCount = 0, highCount = 0, noConfCount = 0;
+	int stereoCount = 0, flatCount = 0, invalidCount = 0;
+
+	for(unsigned int i=0; i<keypoints.size(); ++i)
+	{
+		if(!util3d::isFinite(keypoints3D[i]))
+		{
+			++invalidCount;
+			continue;
+		}
+
+		int cameraIndex = 0;
+		if(cameraModels.size() > 1 && rgbSubImageWidth > 0.0f)
+		{
+			cameraIndex = int(keypoints[i].pt.x / rgbSubImageWidth);
+			if(cameraIndex < 0 || cameraIndex >= (int)cameraModels.size())
+			{
+				cameraIndex = 0;
+			}
+		}
+		const CameraModel & model = cameraModels[cameraIndex];
+
+		// keypoints3D are already in the base frame, so go back to the optical frame to get both
+		// the depth along Z (which the sensor models are expressed in) and the ray direction.
+		const Transform localTransformInv = model.localTransform().inverse();
+		const cv::Point3f ptCam = util3d::transformPoint(keypoints3D[i], localTransformInv);
+		const float Z = std::max(ptCam.z, 1e-5f);
+		const float range = std::max(std::sqrt(ptCam.x*ptCam.x + ptCam.y*ptCam.y + ptCam.z*ptCam.z), 1e-5f);
+
+		const float focal = std::sqrt(std::max(model.fx()*model.fy(), 1e-6));
+
+		float varTangential = (range/focal) * (range/focal) * _depthCovPixelVariance;
+
+		float varRadial = _depthCovRangeVariance;
+		if(_depthCovModel == 3) // time-of-flight
+		{
+			varRadial *= range*range;
+		}
+		else if(_depthCovModel != 1) // disparity, and the auto fallback
+		{
+			varRadial *= range*range*range*range;
+		}
+		if(hasConfidence && _depthCovModel == 0)
+		{
+			// Per-pixel quality class (ARKit/ToF style).
+			// ARKit has three confidence levels, hence we have three variance levels
+			// in this case, but this section might need a rewriting/extension for other sensors.
+			int pixelX = int(keypoints[i].pt.x*rgbToDepthFactorX);
+			int pixelY = int(keypoints[i].pt.y*rgbToDepthFactorY);
+			if(pixelY >= 0 && pixelY < depthConfidence.rows && pixelX >= 0 && pixelX < depthConfidence.cols)
+			{
+				int conf = (int)depthConfidence.at<uint8_t>(pixelY, pixelX);
+				if(conf <= _depthCovLowConfMax)
+				{
+					varRadial = _depthCovLowConfVariance;
+					++lowCount;
+				}
+				else if(conf <= _depthCovMediumConfMax)
+				{
+					varRadial = _depthCovMediumConfVariance;
+					++medCount;
+				}
+				else
+				{
+					varRadial = _depthCovHighConfVariance;
+					++highCount;
+				}
+			}
+			else
+			{
+				++noConfCount;
+			}
+		}
+		else if(hasBaseline && (_depthCovModel == 0 || _depthCovModel == 2))
+		{
+			// Z = f*b/d  =>  sigma_Z = Z^2*sigma_d/(f*b)
+			const double fb = model.fx()*baselines[cameraIndex < (int)baselines.size() ? cameraIndex : 0];
+			if(fb > 1e-9)
+			{
+				const double sigmaZ_perSigmaD = (double)Z*(double)Z/fb;
+				const double scale = sigmaZ_perSigmaD*(double)range/(double)Z;
+				varRadial = (float)(scale*scale*(double)_depthCovDisparityVariance);
+			}
+			++stereoCount;
+		}
+		else
+		{
+			++flatCount;
+		}
+
+		//   Sigma = sigma_t^2 * I + (sigma_r^2 - sigma_t^2) * u * u^T
+		const cv::Matx31f u(ptCam.x/range, ptCam.y/range, ptCam.z/range);
+		const cv::Matx33f covCam =
+				cv::Matx33f::eye()*varTangential + (u*u.t())*(varRadial - varTangential);
+
+		const Eigen::Matrix3f R_eigen = model.localTransform().toEigen3f().linear();
+		const cv::Matx33f R(
+				R_eigen(0,0), R_eigen(0,1), R_eigen(0,2),
+				R_eigen(1,0), R_eigen(1,1), R_eigen(1,2),
+				R_eigen(2,0), R_eigen(2,1), R_eigen(2,2));
+
+		covariances[i] = R * covCam * R.t();
+	}
+
+	UDEBUG("Generated %d feature covariances (confidence tiers low=%d med=%d high=%d, outside map=%d; "
+			"stereo disparity=%d; flat range variance=%d; no 3D point=%d)",
+			(int)covariances.size(), lowCount, medCount, highCount, noConfCount,
+			stereoCount, flatCount, invalidCount);
+
+	return covariances;
 }
 
 //////////////////////////

@@ -125,6 +125,10 @@ RegistrationVis::RegistrationVis(const ParametersMap & parameters, Registration 
 		_PnPVarMedianRatio(Parameters::defaultVisPnPVarianceMedianRatio()),
 		_PnPMaxVar(Parameters::defaultVisPnPMaxVariance()),
 		_PnPSplitLinearCovarianceComponents(Parameters::defaultVisPnPSplitLinearCovComponents()),
+		_PnPUseMsac(Parameters::defaultVisPnPUseMsac()),
+		_PnPMaxFeatureVariance(Parameters::defaultVisPnPMaxFeatureVariance()),
+		_PnPPixelVariance(Parameters::defaultVisPnPPixelVariance()),
+		_PnPMsacUseFeatureCovariance(Parameters::defaultVisPnPMsacUseFeatureCovariance()),
 		_multiSamplingPolicy(Parameters::defaultVisPnPSamplingPolicy()),
 		_correspondencesApproach(Parameters::defaultVisCorType()),
 		_flowWinSize(Parameters::defaultVisCorFlowWinSize()),
@@ -195,6 +199,19 @@ void RegistrationVis::parseParameters(const ParametersMap & parameters)
 	Parameters::parse(parameters, Parameters::kVisPnPVarianceMedianRatio(), _PnPVarMedianRatio);
 	Parameters::parse(parameters, Parameters::kVisPnPMaxVariance(), _PnPMaxVar);
 	Parameters::parse(parameters, Parameters::kVisPnPSplitLinearCovComponents(), _PnPSplitLinearCovarianceComponents);
+	Parameters::parse(parameters, Parameters::kVisPnPUseMsac(), _PnPUseMsac);
+	Parameters::parse(parameters, Parameters::kVisPnPMaxFeatureVariance(), _PnPMaxFeatureVariance);
+	Parameters::parse(parameters, Parameters::kVisPnPPixelVariance(), _PnPPixelVariance);
+	Parameters::parse(parameters, Parameters::kVisPnPMsacUseFeatureCovariance(), _PnPMsacUseFeatureCovariance);
+
+	if((_PnPUseMsac || _PnPMsacUseFeatureCovariance) && _PnPPixelVariance <= 0.0f)
+	{
+		UWARN("%s must be > 0 (got %f) when MSAC or the covariance-aware strategies are enabled: "
+			  "a zero measurement variance makes the whitened problem singular. Forcing it to %f.",
+			  Parameters::kVisPnPPixelVariance().c_str(), _PnPPixelVariance,
+			  Parameters::defaultVisPnPPixelVariance());
+		_PnPPixelVariance = Parameters::defaultVisPnPPixelVariance();
+	}
 	Parameters::parse(parameters, Parameters::kVisPnPSamplingPolicy(), _multiSamplingPolicy);
 	Parameters::parse(parameters, Parameters::kVisCorType(), _correspondencesApproach);
 	Parameters::parse(parameters, Parameters::kVisCorFlowWinSize(), _flowWinSize);
@@ -382,6 +399,10 @@ Transform RegistrationVis::computeTransformationImpl(
 	UDEBUG("%s=%d", Parameters::kVisPnPFlags().c_str(), _PnPFlags);
 	UDEBUG("%s=%f", Parameters::kVisPnPMaxVariance().c_str(), _PnPMaxVar);
 	UDEBUG("%s=%f", Parameters::kVisPnPSplitLinearCovComponents().c_str(), (double)_PnPSplitLinearCovarianceComponents);
+	UDEBUG("%s=%d", Parameters::kVisPnPUseMsac().c_str(), _PnPUseMsac?1:0);
+	UDEBUG("%s=%f", Parameters::kVisPnPMaxFeatureVariance().c_str(), _PnPMaxFeatureVariance);
+	UDEBUG("%s=%f", Parameters::kVisPnPPixelVariance().c_str(), _PnPPixelVariance);
+	UDEBUG("%s=%d", Parameters::kVisPnPMsacUseFeatureCovariance().c_str(), _PnPMsacUseFeatureCovariance?1:0);
 	UDEBUG("%s=%f", Parameters::kVisPnPVarianceMedianRatio().c_str(), (double)_PnPVarMedianRatio);
 	UDEBUG("%s=%d", Parameters::kVisCorType().c_str(), _correspondencesApproach);
 	UDEBUG("%s=%d", Parameters::kVisCorFlowWinSize().c_str(), _flowWinSize);
@@ -560,6 +581,8 @@ Transform RegistrationVis::computeTransformationImpl(
 		std::vector<cv::KeyPoint> wordsKptsTo;
 		std::vector<cv::Point3f> words3From;
 		std::vector<cv::Point3f> words3To;
+		std::vector<cv::Matx33f> wordsCovFrom;
+		std::vector<cv::Matx33f> wordsCovTo;
 		cv::Mat wordsDescFrom;
 		cv::Mat wordsDescTo;
 		if(_correspondencesApproach == 1) //Optical Flow
@@ -801,6 +824,12 @@ Transform RegistrationVis::computeTransformationImpl(
 					wordsFrom.insert(wordsFrom.end(), std::make_pair(id, wordsFrom.size()));
 					wordsKptsFrom.push_back(kptsFrom[i]);
 					words3From.push_back(kptsFrom3DKept[i]);
+					/*
+					if(!kptsFromCovariance.empty())
+					{
+						wordsCovFrom.push_back(kptsFromCovariance[i]);
+					}
+					*/
 
 					wordsTo.insert(wordsTo.end(), std::make_pair(id, wordsTo.size()));
 					wordsKptsTo.push_back(kptsTo[i]);
@@ -808,6 +837,12 @@ Transform RegistrationVis::computeTransformationImpl(
 					{
 						words3To.push_back(kptsTo3D[i]);
 					}
+					/*
+					if(!kptsToCovariance.empty())
+					{
+						wordsCovTo.push_back(kptsToCovariance[i]);
+					}
+					*/
 				}
 				toSignature.sensorData().setFeatures(kptsTo, kptsTo3D, cv::Mat());
 			}
@@ -826,6 +861,12 @@ Transform RegistrationVis::computeTransformationImpl(
 						wordsFrom.insert(wordsFrom.end(), std::make_pair(id, wordsFrom.size()));
 						wordsKptsFrom.push_back(kptsFrom[i]);
 						words3From.push_back(kptsFrom3D[i]);
+						/*
+						if(!kptsFromCovariance.empty())
+						{
+							wordsCovFrom.push_back(kptsFromCovariance[i]);
+						}
+						*/
 					}
 				}
 				toSignature.sensorData().setFeatures(std::vector<cv::KeyPoint>(), std::vector<cv::Point3f>(), cv::Mat());
@@ -982,11 +1023,26 @@ Transform RegistrationVis::computeTransformationImpl(
 				UDEBUG("generated kptsFrom3D=%d", (int)kptsFrom3D.size());
 			}
 
+			std::vector<cv::Matx33f> kptsFromCovariance;
+			if(kptsFromSource == 2 && kptsFrom.size() == fromSignature.getWords3Covariances().size())
+			{
+				kptsFromCovariance = fromSignature.getWords3Covariances();
+			}
+			else if(kptsFromSource == 1 && kptsFrom.size() == fromSignature.sensorData().keypoints3DCovariances().size())
+			{
+				kptsFromCovariance = fromSignature.sensorData().keypoints3DCovariances();
+			}
+			else
+			{
+				kptsFromCovariance = _detectorFrom->generateKeypoints3DCovariance(fromSignature.sensorData(), kptsFrom, kptsFrom3D);
+				UDEBUG("generated kptsFromCovariance=%d", (int)kptsFromCovariance.size());
+			}
+
 			if(!kptsFrom3D.empty() &&
 			   (_detectorFrom->getMinDepth() > 0.0f || _detectorFrom->getMaxDepth() > 0.0f) &&
 			   (!fromSignature.sensorData().cameraModels().empty() || !fromSignature.sensorData().stereoCameraModels().empty())) // Ignore local map from OdometryF2M
 			{
-				_detectorFrom->filterKeypointsByDepth(kptsFrom, descriptorsFrom, kptsFrom3D, _detectorFrom->getMinDepth(), _detectorFrom->getMaxDepth());
+				_detectorFrom->filterKeypointsByDepth(kptsFrom, descriptorsFrom, kptsFrom3D, kptsFromCovariance, _detectorFrom->getMinDepth(), _detectorFrom->getMaxDepth());
 			}
 
 			if(kptsToSource == 2 && kptsTo.size() == toSignature.getWords3().size())
@@ -1015,6 +1071,22 @@ Transform RegistrationVis::computeTransformationImpl(
 						   (int)toSignature.sensorData().keypoints3D().size());
 				}
 				kptsTo3D = _detectorTo->generateKeypoints3D(toSignature.sensorData(), kptsTo);
+				UDEBUG("generated kptsTo3D=%d", (int)kptsTo3D.size());
+			}
+
+			std::vector<cv::Matx33f> kptsToCovariance;
+			if(kptsToSource == 2 && kptsTo.size() == toSignature.getWords3Covariances().size())
+			{
+				kptsToCovariance = toSignature.getWords3Covariances();
+			}
+			else if(kptsToSource == 1 && kptsTo.size() == toSignature.sensorData().keypoints3DCovariances().size())
+			{
+				kptsToCovariance = toSignature.sensorData().keypoints3DCovariances();
+			}
+			else
+			{
+				kptsToCovariance = _detectorTo->generateKeypoints3DCovariance(toSignature.sensorData(), kptsTo, kptsTo3D);
+				UDEBUG("generated kptsToCovariance=%d", (int)kptsToCovariance.size());
 			}
 
 			if(kptsTo3D.size() &&
@@ -1026,8 +1098,8 @@ Transform RegistrationVis::computeTransformationImpl(
 
 			UASSERT(kptsFrom.empty() || descriptorsFrom.rows == 0 || int(kptsFrom.size()) == descriptorsFrom.rows);
 
-			fromSignature.sensorData().setFeatures(kptsFrom, kptsFrom3D, descriptorsFrom);
-			toSignature.sensorData().setFeatures(kptsTo, kptsTo3D, descriptorsTo);
+			fromSignature.sensorData().setFeatures(kptsFrom, kptsFrom3D, descriptorsFrom, kptsFromCovariance);
+			toSignature.sensorData().setFeatures(kptsTo, kptsTo3D, descriptorsTo, kptsToCovariance);
 
 			UDEBUG("descriptorsFrom=%d", descriptorsFrom.rows);
 			UDEBUG("descriptorsTo=%d", descriptorsTo.rows);
@@ -1242,6 +1314,10 @@ Transform RegistrationVis::computeTransformationImpl(
 											wordsKptsFrom.push_back(kptsFrom[matchedIndex]);
 										}
 										words3From.push_back(kptsFrom3D[matchedIndex]);
+										if(!kptsFromCovariance.empty())
+										{
+											wordsCovFrom.push_back(kptsFromCovariance[matchedIndex]);
+										}
 										wordsDescFrom.push_back(descriptorsFrom.row(matchedIndex));
 									}
 
@@ -1251,6 +1327,10 @@ Transform RegistrationVis::computeTransformationImpl(
 									if(!kptsTo3D.empty())
 									{
 										words3To.push_back(kptsTo3D[i]);
+									}
+									if(!kptsToCovariance.empty())
+									{
+										wordsCovTo.push_back(kptsToCovariance[i]);
 									}
 								}
 								else
@@ -1262,6 +1342,10 @@ Transform RegistrationVis::computeTransformationImpl(
 									if(!kptsTo3D.empty())
 									{
 										words3To.push_back(kptsTo3D[i]);
+									}
+									if(!kptsToCovariance.empty())
+									{
+										wordsCovTo.push_back(kptsToCovariance[i]);
 									}
 
 									++newToId;
@@ -1284,6 +1368,10 @@ Transform RegistrationVis::computeTransformationImpl(
 									wordsKptsFrom.push_back(kptsFrom[i]);
 									wordsDescFrom.push_back(descriptorsFrom.row(i));
 									words3From.push_back(kptsFrom3D[i]);
+									if(!kptsFromCovariance.empty())
+									{
+										wordsCovFrom.push_back(kptsFromCovariance[i]);
+									}
 
 									++addWordsFromNotMatched;
 								}
@@ -1389,6 +1477,10 @@ Transform RegistrationVis::computeTransformationImpl(
 										wordsKptsFrom.push_back(kptsFrom[matchedIndexFrom]);
 									}
 									words3From.push_back(kptsFrom3D[matchedIndexFrom]);
+									if(!kptsFromCovariance.empty())
+									{
+										wordsCovFrom.push_back(kptsFromCovariance[matchedIndexFrom]);
+									}
 									wordsDescFrom.push_back(descriptorsFrom.row(matchedIndexFrom));
 
 									if(	matchedIndexTo >= 0 &&
@@ -1402,6 +1494,10 @@ Transform RegistrationVis::computeTransformationImpl(
 										if(!kptsTo3D.empty())
 										{
 											words3To.push_back(kptsTo3D[matchedIndexTo]);
+										}
+										if(!kptsToCovariance.empty())
+										{
+											wordsCovTo.push_back(kptsToCovariance[matchedIndexTo]);
 										}
 									}
 								}
@@ -1418,6 +1514,10 @@ Transform RegistrationVis::computeTransformationImpl(
 									wordsKptsFrom.push_back(kptsFrom[i]);
 									wordsDescFrom.push_back(descriptorsFrom.row(i));
 									words3From.push_back(kptsFrom3D[i]);
+									if(!kptsFromCovariance.empty())
+									{
+										wordsCovFrom.push_back(kptsFromCovariance[i]);
+									}
 								}
 							}
 
@@ -1432,6 +1532,10 @@ Transform RegistrationVis::computeTransformationImpl(
 									if(!kptsTo3D.empty())
 									{
 										words3To.push_back(kptsTo3D[i]);
+									}
+									if(!kptsToCovariance.empty())
+									{
+										wordsCovTo.push_back(kptsToCovariance[i]);
 									}
 									++newToId;
 								}
@@ -1597,6 +1701,10 @@ Transform RegistrationVis::computeTransformationImpl(
 							{
 								words3From.push_back(kptsFrom3D[i]);
 							}
+							if(!kptsFromCovariance.empty())
+							{
+								wordsCovFrom.push_back(kptsFromCovariance[i]);
+							}
 							wordsDescFrom.push_back(descriptorsFrom.row(i));
 						}
 						++i;
@@ -1616,6 +1724,10 @@ Transform RegistrationVis::computeTransformationImpl(
 							{
 								words3To.push_back(kptsTo3D[i]);
 							}
+							if(!kptsToCovariance.empty())
+							{
+								wordsCovTo.push_back(kptsToCovariance[i]);
+							}
 						}
 						++i;
 					}
@@ -1634,12 +1746,16 @@ Transform RegistrationVis::computeTransformationImpl(
 					{
 						words3From.push_back(kptsFrom3D[i]);
 					}
+					if(!kptsFromCovariance.empty())
+					{
+						wordsCovFrom.push_back(kptsFromCovariance[i]);
+					}
 				}
 			}
 		}
 
-		fromSignature.setWords(wordsFrom, wordsKptsFrom, words3From, wordsDescFrom);
-		toSignature.setWords(wordsTo, wordsKptsTo, words3To, wordsDescTo);
+		fromSignature.setWords(wordsFrom, wordsKptsFrom, words3From, wordsCovFrom, wordsDescFrom);
+		toSignature.setWords(wordsTo, wordsKptsTo, words3To, wordsCovTo, wordsDescTo);
 	}
 
 	/////////////////////
@@ -1780,10 +1896,34 @@ Transform RegistrationVis::computeTransformationImpl(
 					std::map<int, int> uniqueWordsB = uMultimapToMapUnique(toSignature.getWords());
 					std::map<int, cv::Point3f> words3A;
 					std::map<int, cv::Point3f> words3B;
+					std::map<int, cv::Matx33f> covariances3A;
 					std::map<int, cv::KeyPoint> wordsB;
+
+					// A zero covariance is the "unknown" sentinel and is not inserted.
+					const double maxFeatureVariance = (double)_PnPMaxFeatureVariance;
+					int rejectedTooUncertain = 0;
+					int missingCovariance = 0;
+
 					for(std::map<int, int>::iterator iter=uniqueWordsA.begin(); iter!=uniqueWordsA.end(); ++iter)
 					{
 						words3A.insert(std::make_pair(iter->first, fromSignature.getWords3()[iter->second]));
+						if(!fromSignature.getWords3Covariances().empty())
+						{
+							const cv::Matx33f & cov = fromSignature.getWords3Covariances()[iter->second];
+							const double meanVar = (cov(0,0) + cov(1,1) + cov(2,2)) / 3.0;
+							if(meanVar <= 0.0)
+							{
+								++missingCovariance;
+							}
+							else if(maxFeatureVariance > 0.0 && meanVar > maxFeatureVariance)
+							{
+								++rejectedTooUncertain;
+							}
+							else
+							{
+								covariances3A.insert(std::make_pair(iter->first, cov));
+							}
+						}
 					}
 					for(std::map<int, int>::iterator iter=uniqueWordsB.begin(); iter!=uniqueWordsB.end(); ++iter)
 					{
@@ -1792,6 +1932,12 @@ Transform RegistrationVis::computeTransformationImpl(
 						{
 							words3B.insert(std::make_pair(iter->first, toSignature.getWords3()[iter->second]));
 						}
+					}
+					if(rejectedTooUncertain || missingCovariance)
+					{
+						UDEBUG("Feature covariances: %d words above %s=%f, %d words without covariance.",
+								rejectedTooUncertain, Parameters::kVisPnPMaxFeatureVariance().c_str(),
+								_PnPMaxFeatureVariance, missingCovariance);
 					}
 
 					std::vector<CameraModel> models;
@@ -1811,6 +1957,11 @@ Transform RegistrationVis::computeTransformationImpl(
 					{
 						// Multi-Camera
 						UASSERT(models[0].isValidForProjection());
+
+						if(_PnPUseMsac || _PnPMsacUseFeatureCovariance)
+						{
+							UWARN("PnP MSAC / 6DoF covariance from Jacobian matrices are not supported for multi-camera, using RANSAC instead.");
+						}
 
 						std::vector<std::vector<int> > matchesPerCam;
 						std::vector<std::vector<int> > inliersPerCam;
@@ -1849,7 +2000,13 @@ Transform RegistrationVis::computeTransformationImpl(
 					}
 					else
 					{
-						UASSERT(models.size() == 1 && models[0].isValidForProjection());
+						if(_PnPMsacUseFeatureCovariance && covariances3A.empty())
+						{
+							UWARN("%s is enabled but no feature covariance is available for this pair. "
+								  "Enable %s so that covariances are produced at extraction time.",
+								  Parameters::kVisPnPMsacUseFeatureCovariance().c_str(),
+								  Parameters::kKpDepthCovEnabled().c_str());
+						}
 
 						transform = util3d::estimateMotion3DTo2D(
 								words3A,
@@ -1867,13 +2024,17 @@ Transform RegistrationVis::computeTransformationImpl(
 								&covariance,
 								&matchesV,
 								&inliersV,
-								_PnPSplitLinearCovarianceComponents);
+								_PnPSplitLinearCovarianceComponents,
+								covariances3A,
+								_PnPUseMsac,
+								_PnPPixelVariance,
+								_PnPMsacUseFeatureCovariance); // weight the MSac estimator by the feature covariances
 						inliers = inliersV;
 						matches = matchesV;
 					}
 					UDEBUG("inliers: %d/%d", (int)inliersV.size(), (int)matchesV.size());
 					if(transform.isNull())
-					{
+					{ // This message is displayed even if the transform was rejected because of high variance. Maybe to be fixed ?
 						msg = uFormat("Not enough inliers %d/%d (matches=%d) between %d and %d",
 								(int)inliers.size(), _minInliers, (int)matches.size(), fromSignature.id(), toSignature.id());
 						UINFO("%s", msg.c_str());

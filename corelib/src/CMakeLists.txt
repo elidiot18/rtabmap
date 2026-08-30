@@ -144,6 +144,7 @@ SET(SRC_FILES
     
     opencv/ORBextractor.cc
     opencv/solvepnp.cpp
+	opencv/solvepnp_msac.cpp
     opencv/five-point.cpp
 )
 

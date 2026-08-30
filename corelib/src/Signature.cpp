@@ -313,11 +313,13 @@ void Signature::changeWordsRef(int oldWordId, int activeWordId)
 void Signature::setWords(const std::multimap<int, int> & words,
 		const std::vector<cv::KeyPoint> & keypoints,
 		const std::vector<cv::Point3f> & points,
+		const std::vector<cv::Matx33f> & covariances,
 		const cv::Mat & descriptors)
 {
 	UASSERT_MSG(descriptors.empty() || descriptors.rows == (int)words.size(), uFormat("words=%d, descriptors=%d", (int)words.size(), descriptors.rows).c_str());
 	UASSERT_MSG(points.empty() || points.size() == words.size(),  uFormat("words=%d, points=%d", (int)words.size(), (int)points.size()).c_str());
 	UASSERT_MSG(keypoints.empty() || keypoints.size() == words.size(),  uFormat("words=%d, descriptors=%d", (int)words.size(), (int)keypoints.size()).c_str());
+	UASSERT_MSG(covariances.empty() || covariances.size() == words.size(),  uFormat("words=%d, covariances=%d", (int)words.size(), (int)covariances.size()).c_str());
 	//UASSERT(words.empty() || !keypoints.empty() || !points.empty() || !descriptors.empty());
 
 	_invalidWordsCount = 0;
@@ -335,6 +337,7 @@ void Signature::setWords(const std::multimap<int, int> & words,
 	_words = words;
 	_wordsKpts = keypoints;
 	_words3 = points;
+	_words3Covariances = covariances;
 	_wordsDescriptors = descriptors.clone();
 }
 
@@ -348,6 +351,7 @@ void Signature::removeAllWords()
 	_words.clear();
 	_wordsKpts.clear();
 	_words3.clear();
+	_words3Covariances.clear();
 	_wordsDescriptors = cv::Mat();
 	_invalidWordsCount = 0;
 }
@@ -399,6 +403,7 @@ unsigned long Signature::getMemoryUsed(bool withSensorData) const // Return memo
 	total += _words.size() * (sizeof(int)*2+sizeof(std::multimap<int, cv::KeyPoint>::iterator)) + sizeof(std::multimap<int, cv::KeyPoint>);
 	total += _wordsKpts.size() * sizeof(cv::KeyPoint) + sizeof(std::vector<cv::KeyPoint>);
 	total += _words3.size() * sizeof(cv::Point3f) + sizeof(std::vector<cv::Point3f>);
+	total += _words3Covariances.size() * sizeof(cv::Matx33f) + sizeof(std::vector<cv::Matx33f>);
 	total += _wordsDescriptors.empty()?0:_wordsDescriptors.total() * _wordsDescriptors.elemSize() + sizeof(cv::Mat);
 	total += _wordsChanged.size() * (sizeof(int)*2+sizeof(std::map<int, int>::iterator)) + sizeof(std::map<int, int>);
 	if(withSensorData)

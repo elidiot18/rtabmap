@@ -440,10 +440,14 @@ TEST(SensorDataTest, SetFeatures)
     std::vector<cv::Point3f> keypoints3D;
     keypoints3D.push_back(cv::Point3f(1.0f, 2.0f, 3.0f));
     keypoints3D.push_back(cv::Point3f(4.0f, 5.0f, 6.0f));
+
+    std::vector<cv::Matx33f> keypoints3DCovariances;
+    keypoints3DCovariances.push_back(cv::Matx33f::eye()*0.01f);
+    keypoints3DCovariances.push_back(cv::Matx33f::eye()*0.01f);
     
     cv::Mat descriptors = cv::Mat::ones(2, 128, CV_32F);
     
-    data.setFeatures(keypoints, keypoints3D, descriptors);
+    data.setFeatures(keypoints, keypoints3D, descriptors, keypoints3DCovariances);
     
     EXPECT_EQ(data.keypoints().size(), 2u);
     EXPECT_EQ(data.keypoints3D().size(), 2u);
@@ -848,8 +852,10 @@ TEST(SensorDataTest, ComprehensiveUsage)
     keypoints.push_back(cv::KeyPoint(100, 200, 5.0f));
     std::vector<cv::Point3f> keypoints3D;
     keypoints3D.push_back(cv::Point3f(1.0f, 2.0f, 3.0f));
+    std::vector<cv::Matx33f> keypoints3DCovariances;
+    keypoints3DCovariances.push_back(cv::Matx33f::eye()*0.01f);
     cv::Mat descriptors = cv::Mat::ones(1, 128, CV_32F);
-    data.setFeatures(keypoints, keypoints3D, descriptors);
+    data.setFeatures(keypoints, keypoints3D, descriptors, keypoints3DCovariances);
     
     // Set global pose
     Transform pose(10.0f, 20.0f, 30.0f, 0, 0, 0);

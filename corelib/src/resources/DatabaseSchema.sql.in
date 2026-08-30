@@ -83,6 +83,8 @@ CREATE TABLE Feature (
 	depth_x FLOAT,
 	depth_y FLOAT,
 	depth_z FLOAT,
+	depth_covariance BLOB,    -- 6 floats (24 bytes): upper triangle xx,xy,xz,yy,yz,zz of the
+	                          -- symmetric 3x3 position covariance, in the same base frame as depth_x/y/z
 	descriptor_size INTEGER,
 	descriptor BLOB,
 	FOREIGN KEY (node_id) REFERENCES Node(id)

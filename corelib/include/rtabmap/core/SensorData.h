@@ -819,9 +819,10 @@ public:
 	 * 
 	 * @param keypoints 2D keypoints in image coordinates
 	 * @param keypoints3D 3D points corresponding to keypoints (in base_link frame)
+	 * @param keypoints3DCovariances 3x3 position covariance of each 3D keypoint (in base_link frame)
 	 * @param descriptors Feature descriptors matrix (one row per keypoint)
 	 */
-	void setFeatures(const std::vector<cv::KeyPoint> & keypoints, const std::vector<cv::Point3f> & keypoints3D, const cv::Mat & descriptors);
+	void setFeatures(const std::vector<cv::KeyPoint> & keypoints, const std::vector<cv::Point3f> & keypoints3D, const cv::Mat & descriptors, const std::vector<cv::Matx33f> & keypoints3DCovariances = std::vector<cv::Matx33f>());
 	
 	/**
 	 * @brief Returns the 2D keypoints
@@ -834,6 +835,17 @@ public:
 	 * @return Const reference to vector of 3D points (in base_link frame)
 	 */
 	const std::vector<cv::Point3f> & keypoints3D() const {return _keypoints3D;}
+
+	/**
+	 * @brief Returns the keypoints' 3D position covariances
+	 *
+	 * One symmetric 3x3 covariance per 3D keypoint, in the same base_link frame as
+	 * @ref keypoints3D(), produced by @ref Feature2D::generateKeypoints3DCovariance() from the
+	 * sensor noise model. Empty when Kp/DepthCovEnabled is false.
+	 *
+	 * @return Const reference to vector of 3x3 covariances (base_link frame)
+	 */
+	const std::vector<cv::Matx33f> & keypoints3DCovariances() const {return _keypoints3DCovariances;}
 	
 	/**
 	 * @brief Returns the feature descriptors
@@ -1052,6 +1064,7 @@ private:
 	// Visual features
 	std::vector<cv::KeyPoint> _keypoints; ///< 2D keypoints in image coordinates
 	std::vector<cv::Point3f> _keypoints3D; ///< 3D points corresponding to keypoints (in base_link frame)
+	std::vector<cv::Matx33f> _keypoints3DCovariances; ///< 3x3 position covariance of each 3d keypoint, in base_link frame
 	cv::Mat _descriptors; ///< Feature descriptors matrix (one row per keypoint)
 
 	// Global descriptors

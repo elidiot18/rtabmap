@@ -341,7 +341,7 @@ Transform OdometryF2M::computeTransform(
 					regPipeline_->parseParameters(params);
 				}
 
-				data.setFeatures(lastFrame_->sensorData().keypoints(), lastFrame_->sensorData().keypoints3D(), lastFrame_->sensorData().descriptors());
+				data.setFeatures(lastFrame_->sensorData().keypoints(), lastFrame_->sensorData().keypoints3D(), lastFrame_->sensorData().descriptors(), lastFrame_->sensorData().keypoints3DCovariances());
 				data.setLaserScan(lastFrame_->sensorData().laserScanRaw());
 
 				UDEBUG("Registration time = %fs", regInfo.totalTime);
@@ -1272,13 +1272,13 @@ Transform OdometryF2M::computeTransform(
 										newFramePose.translation()));
 					}
 
-					map_->setWords(mapWords, mapWordsKpts, mapPoints, mapDescriptors);
+					map_->setWords(mapWords, mapWordsKpts, mapPoints, std::vector<cv::Matx33f>(), mapDescriptors);
 				}
 
 				if(lastFrameWords3Updated)
 				{
 					// update output with refined 3d points from bundle adjustment
-					data.setFeatures(lastFrame_->getWordsKpts(), lastFrameWords3, lastFrame_->getWordsDescriptors());
+					data.setFeatures(lastFrame_->getWordsKpts(), lastFrameWords3, lastFrame_->getWordsDescriptors(), lastFrame_->getWords3Covariances());
 				}
 			}
 
@@ -1313,7 +1313,7 @@ Transform OdometryF2M::computeTransform(
 					dummy);
 			lastFrame_->sensorData().setLaserScan(dummy.sensorData().laserScanRaw());
 
-			data.setFeatures(lastFrame_->sensorData().keypoints(), lastFrame_->sensorData().keypoints3D(), lastFrame_->sensorData().descriptors());
+			data.setFeatures(lastFrame_->sensorData().keypoints(), lastFrame_->sensorData().keypoints3D(), lastFrame_->sensorData().descriptors(), lastFrame_->sensorData().keypoints3DCovariances());
 			data.setLaserScan(lastFrame_->sensorData().laserScanRaw());
 
 			// a very high variance tells that the new pose is not linked with the previous one
@@ -1416,7 +1416,7 @@ Transform OdometryF2M::computeTransform(
 						}
 					}
 
-					map_->setWords(words, wordsKpts, transformedPoints, descriptors);
+					map_->setWords(words, wordsKpts, transformedPoints, std::vector<cv::Matx33f>(), descriptors);
 					addKeyFrame = true;
 				}
 				else
